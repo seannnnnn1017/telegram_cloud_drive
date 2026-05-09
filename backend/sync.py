@@ -85,6 +85,51 @@ def _update_env_file(path: Path, updates: dict) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n")
 
 
+async def _resolve_chat(client, chat_id_raw: str):
+    """Resolve CHAT_ID to a Telethon entity, trying multiple formats."""
+    from telethon.tl.types import PeerChannel, PeerChat
+
+    # String username like @channelname
+    if not chat_id_raw.lstrip("-").isdigit():
+        return await client.get_entity(chat_id_raw)
+
+    chat_id = int(chat_id_raw)
+
+    if chat_id < 0:
+        # Bot API channel format: -100XXXXXXXXXX
+        if str(abs(chat_id)).startswith("100") and len(str(abs(chat_id))) > 12:
+            channel_id = int(str(abs(chat_id))[3:])
+            try:
+                return await client.get_entity(PeerChannel(channel_id))
+            except Exception:
+                pass
+        # Regular negative group/supergroup
+        try:
+            return await client.get_entity(PeerChat(abs(chat_id)))
+        except Exception:
+            pass
+        try:
+            return await client.get_entity(chat_id)
+        except Exception:
+            pass
+    else:
+        # Positive — try as channel first (Bot API omits -100 prefix)
+        try:
+            return await client.get_entity(PeerChannel(chat_id))
+        except Exception:
+            pass
+        # Fall back to user / direct entity lookup
+        try:
+            return await client.get_entity(chat_id)
+        except Exception:
+            pass
+
+    raise ValueError(
+        f"Could not resolve CHAT_ID={chat_id_raw!r}. "
+        "Make sure the Telegram user account is a member of the channel/group."
+    )
+
+
 async def sync_from_telegram() -> dict:
     try:
         from telethon import TelegramClient as TelethonClient
@@ -118,11 +163,7 @@ async def sync_from_telegram() -> dict:
 
     try:
         existing_msg_ids = await list_all_message_ids()
-
-        try:
-            chat_id = int(chat_id_raw)
-        except ValueError:
-            chat_id = chat_id_raw
+        chat_entity = await _resolve_chat(client, chat_id_raw)
 
         imported = 0
         skipped_exists = 0
@@ -130,7 +171,7 @@ async def sync_from_telegram() -> dict:
 
         from telethon.utils import pack_bot_file_id
 
-        async for message in client.iter_messages(chat_id):
+        async for message in client.iter_messages(chat_entity):
             if message.id in existing_msg_ids:
                 skipped_exists += 1
                 continue

@@ -365,7 +365,7 @@ async def run_inspect_messages(argv: list[str]) -> int:
         print("Error: telethon not installed — pip install -e .", flush=True)
         return 1
 
-    from backend.sync import parse_caption
+    from backend.sync import parse_caption, _resolve_chat
 
     client = TelegramClient(StringSession(session_str), int(api_id_raw), api_hash)
     await client.connect()
@@ -375,14 +375,15 @@ async def run_inspect_messages(argv: list[str]) -> int:
         return 1
 
     try:
-        chat_id = int(chat_id_raw)
-    except ValueError:
-        chat_id = chat_id_raw
-
-    print(f"\n=== inspect last {args.limit} messages in chat {chat_id_raw} ===\n", flush=True)
+        chat_entity = await _resolve_chat(client, chat_id_raw)
+        print(f"\n=== inspect last {args.limit} messages in chat {chat_id_raw} ({type(chat_entity).__name__}) ===\n", flush=True)
+    except Exception as exc:
+        print(f"Error resolving chat: {exc}", flush=True)
+        await client.disconnect()
+        return 1
 
     count = 0
-    async for message in client.iter_messages(chat_id, limit=args.limit):
+    async for message in client.iter_messages(chat_entity, limit=args.limit):
         count += 1
         caption = message.message or ""
         parsed = parse_caption(caption)
