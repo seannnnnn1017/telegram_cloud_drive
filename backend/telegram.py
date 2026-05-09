@@ -130,12 +130,18 @@ class TelegramClient:
         return r.content
 
     async def delete_message(self, message_id: int) -> None:
+        import logging
+        log = logging.getLogger("telecloud.telegram")
         r = await self._client.post(
             f"{self._api}/deleteMessage",
             json={"chat_id": self._chat_id, "message_id": message_id},
             timeout=10.0,
         )
         data = r.json()
+        log.warning(
+            "deleteMessage chat_id=%s message_id=%s → ok=%s desc=%r",
+            self._chat_id, message_id, data.get("ok"), data.get("description"),
+        )
         if not data.get("ok"):
             desc = data.get("description", "unknown error")
             # Treat "already gone" as success — another device may have deleted it first
