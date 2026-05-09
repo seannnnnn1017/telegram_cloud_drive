@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS shares (
     expires_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_shares_file ON shares(file_id);
+CREATE TABLE IF NOT EXISTS deleted_messages (
+    tg_message_id INTEGER PRIMARY KEY,
+    deleted_at    TEXT NOT NULL
+);
 """
 
 
@@ -283,6 +287,36 @@ async def list_all_uids() -> set[str]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT uid FROM files WHERE uid IS NOT NULL") as cur:
             return {row[0] for row in await cur.fetchall()}
+
+
+async def add_deleted_message_id(tg_message_id: int) -> None:
+    """Record that a message has been intentionally deleted (tombstone)."""
+    from datetime import datetime, timezone
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO deleted_messages (tg_message_id, deleted_at) VALUES (?, ?)",
+            (tg_message_id, datetime.now(timezone.utc).isoformat()),
+        )
+        await db.commit()
+
+
+async def list_deleted_message_ids() -> set[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT tg_message_id FROM deleted_messages") as cur:
+            return {row[0] for row in await cur.fetchall()}
+
+
+async def remove_deleted_message_ids(msg_ids: set[int]) -> None:
+    """Clean up tombstones for messages confirmed gone from Telegram."""
+    if not msg_ids:
+        return
+    placeholders = ",".join("?" * len(msg_ids))
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            f"DELETE FROM deleted_messages WHERE tg_message_id IN ({placeholders})",
+            list(msg_ids),
+        )
+        await db.commit()
 
 
 async def get_storage_stats() -> dict:

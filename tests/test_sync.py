@@ -13,12 +13,14 @@ import backend.database as db_module
 db_module.DB_PATH = Path(tempfile.gettempdir()) / "test_vault_sync.db"
 
 from backend.database import (
+    add_deleted_message_id,
     delete_files_by_message_ids,
     get_file,
     init_db,
     insert_file,
     list_all_message_ids,
     list_all_uids,
+    list_deleted_message_ids,
     list_files,
     list_folders,
 )
@@ -458,3 +460,51 @@ async def test_two_server_deletion_sync():
     files = await list_files()
     assert len(files) == 1
     assert files[0].name == "alive.jpg"
+
+
+# ---------------------------------------------------------------------------
+# Tombstone (deleted_messages) tests
+# ---------------------------------------------------------------------------
+
+async def test_tombstone_prevents_reimport_after_delete():
+    """After a file is deleted (tombstone written), sync must not re-import it
+    even when the Telegram message is still present in the channel."""
+    uid = "uid-tombstone"
+    cap = _make_tg_caption("ghost.jpg", uid=uid, file_id="TG_GHOST")
+
+    # Simulate: file was uploaded, then deleted locally (tombstone written)
+    await add_deleted_message_id(42)
+
+    # Telegram still has the message (deletion failed or slow to propagate)
+    tg_messages = [FakeMessage(id=42, caption=cap)]
+    mock_client = AsyncMock()
+    mock_client.iter_messages = lambda entity: _fake_iter(tg_messages)
+
+    result = await _run_sync(mock_client, object())
+
+    assert result["imported"] == 0
+    assert len(await list_files()) == 0
+
+
+async def test_tombstone_cleanup_when_telegram_message_gone():
+    """When a tombstoned message is confirmed absent from Telegram,
+    the tombstone should be cleaned up."""
+    await add_deleted_message_id(99)
+    assert 99 in await list_deleted_message_ids()
+
+    # Telegram returns no messages (message 99 is truly gone)
+    mock_client = AsyncMock()
+    mock_client.iter_messages = lambda entity: _fake_iter([])
+
+    await _run_sync(mock_client, object())
+
+    assert 99 not in await list_deleted_message_ids()
+
+
+async def test_import_message_respects_tombstone():
+    """_import_message must refuse to insert a tombstoned message."""
+    await add_deleted_message_id(55)
+    cap = _make_tg_caption("blocked.jpg", uid="uid-blocked", file_id="TG_B")
+    result = await _import_message(FakeMessage(id=55, caption=cap))
+    assert result is False
+    assert len(await list_files()) == 0

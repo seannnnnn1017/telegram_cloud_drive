@@ -19,6 +19,7 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .database import (
+    add_deleted_message_id,
     bulk_delete_files,
     create_share,
     delete_share,
@@ -395,7 +396,8 @@ async def api_delete_folder(folder_id: int):
     file_records = await list_files_in_folder_tree(folder_id)
     tg = get_tg_client()
     for record in file_records:
-        with suppress(Exception):  # best-effort; sync will clean up any that fail
+        await add_deleted_message_id(record.tg_message_id)
+        with suppress(Exception):
             await tg.delete_message(record.tg_message_id)
     deleted_files = await bulk_delete_files([record.id for record in file_records])
     folder_ids = await list_folder_tree_ids(folder_id)
@@ -632,11 +634,12 @@ async def api_delete(file_id: int):
     record = await get_file(file_id)
     if record is None:
         raise HTTPException(status_code=404, detail="File not found")
+    # Write tombstone FIRST — sync will never re-import this message_id even if
+    # Telegram deletion fails or takes time to propagate
+    await add_deleted_message_id(record.tg_message_id)
     tg = get_tg_client()
-    try:
+    with suppress(Exception):  # best-effort; tombstone guarantees it won't come back
         await tg.delete_message(record.tg_message_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
     await delete_file(file_id)
     return {"ok": True}
 
@@ -649,10 +652,9 @@ async def api_bulk_delete(body: BulkDeleteRequest):
     for fid in body.ids:
         record = await get_file(fid)
         if record:
-            try:
+            await add_deleted_message_id(record.tg_message_id)
+            with suppress(Exception):
                 await tg.delete_message(record.tg_message_id)
-            except ValueError as exc:
-                raise HTTPException(status_code=502, detail=str(exc)) from exc
     deleted = await bulk_delete_files(body.ids)
     return {"deleted": deleted}
 

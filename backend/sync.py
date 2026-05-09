@@ -13,6 +13,8 @@ from .database import (
     insert_file,
     list_all_message_ids,
     list_all_uids,
+    list_deleted_message_ids,
+    remove_deleted_message_ids,
 )
 
 CAPTION_VERSION = 1
@@ -89,6 +91,7 @@ async def _import_message(
     message,
     known_uids: Optional[set[str]] = None,
     known_msg_ids: Optional[set[int]] = None,
+    deleted_msg_ids: Optional[set[int]] = None,
 ) -> bool:
     """Try to import a single Telethon message into the DB.
 
@@ -100,6 +103,12 @@ async def _import_message(
     Returns True if the message was inserted.
     """
     from telethon.utils import pack_bot_file_id
+
+    # Never re-import intentionally deleted messages
+    if deleted_msg_ids is None:
+        deleted_msg_ids = await list_deleted_message_ids()
+    if message.id in deleted_msg_ids:
+        return False
 
     caption = message.message or ""
     parsed = parse_caption(caption)
@@ -161,6 +170,7 @@ async def _run_sync(client, chat_entity) -> dict:
     db_msg_ids = await list_all_message_ids()
     known_uids = await list_all_uids()
     known_msg_ids = set(db_msg_ids)  # mutable copy for import dedup
+    deleted_msg_ids = await list_deleted_message_ids()  # tombstones — never re-import
 
     eid = getattr(chat_entity, "id", "?")
     ename = getattr(chat_entity, "title", None) or getattr(chat_entity, "first_name", "?")
@@ -175,6 +185,10 @@ async def _run_sync(client, chat_entity) -> dict:
     async for message in client.iter_messages(chat_entity):
         total_seen += 1
         telegram_msg_ids.add(message.id)
+
+        # Never re-import intentionally deleted messages
+        if message.id in deleted_msg_ids:
+            continue
 
         # Quick pre-filter by message_id
         if message.id in known_msg_ids:
@@ -192,17 +206,22 @@ async def _run_sync(client, chat_entity) -> dict:
             skipped_exists += 1
             continue
 
-        did_import = await _import_message(message, known_uids, known_msg_ids)
+        did_import = await _import_message(message, known_uids, known_msg_ids, deleted_msg_ids)
         if did_import:
             imported += 1
         else:
             skipped_no_caption += 1
 
     # Remove local records whose Telegram messages no longer exist
-    orphaned = db_msg_ids - telegram_msg_ids
+    # (exclude tombstoned IDs — they're already absent from DB intentionally)
+    orphaned = db_msg_ids - telegram_msg_ids - deleted_msg_ids
     deleted = await delete_files_by_message_ids(orphaned)
     if deleted:
         log.warning("sync: removed %s orphaned record(s)", deleted)
+
+    # Clean up tombstones for messages confirmed gone from Telegram
+    confirmed_gone = deleted_msg_ids - telegram_msg_ids
+    await remove_deleted_message_ids(confirmed_gone)
 
     log.warning(
         "sync: done — total_seen=%s imported=%s deleted=%s skipped_exists=%s skipped_no_caption=%s",
@@ -422,7 +441,10 @@ async def start_sync_listener(on_change=None) -> None:
         @client.on(events.NewMessage(chats=chat_entity))
         async def _on_new_message(event):
             try:
-                did_import = await _import_message(event.message)
+                tombstones = await list_deleted_message_ids()
+                did_import = await _import_message(
+                    event.message, deleted_msg_ids=tombstones
+                )
                 if did_import:
                     log.warning("sync event: imported message_id=%s", event.message.id)
                     await _notify({"imported": 1, "deleted": 0})
