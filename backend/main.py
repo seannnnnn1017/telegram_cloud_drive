@@ -60,6 +60,8 @@ async def api_list_files(
 
 @app.post("/api/upload", response_model=FileResponse, status_code=201)
 async def api_upload(file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
     content = await file.read()
     if len(content) > MAX_BYTES:
         raise HTTPException(
@@ -117,7 +119,7 @@ async def api_preview(file_id: int):
     )
 
 
-@app.delete("/api/files/{file_id}")
+@app.delete("/api/files/{file_id}", response_model=dict)
 async def api_delete(file_id: int):
     record = await get_file(file_id)
     if record is None:
@@ -128,7 +130,7 @@ async def api_delete(file_id: int):
     return {"ok": True}
 
 
-@app.post("/api/files/bulk-delete")
+@app.post("/api/files/bulk-delete", response_model=dict)
 async def api_bulk_delete(body: BulkDeleteRequest):
     if not body.ids:
         raise HTTPException(status_code=400, detail="No IDs provided")
