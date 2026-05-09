@@ -124,11 +124,16 @@ async def _resolve_chat(client, chat_id_raw: str, bot_token: Optional[str] = Non
         # Positive — first check if this is the user's own Telegram ID.
         # If so, files are stored in the DM between user and bot, so the
         # correct Telethon entity is the BOT (not the user themselves).
+        # Use iter_dialogs to find the bot — get_entity() alone fails when
+        # the entity cache is cold (e.g. fresh server startup).
         try:
             me = await client.get_me()
             if me is not None and chat_id == me.id and bot_token:
                 bot_user_id = int(bot_token.split(":")[0])
-                return await client.get_entity(bot_user_id)
+                async for dialog in client.iter_dialogs():
+                    entity = dialog.entity
+                    if getattr(entity, "id", None) == bot_user_id:
+                        return entity
         except Exception:
             pass
 
