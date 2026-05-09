@@ -2,29 +2,45 @@ import os
 import aiosqlite
 from pathlib import Path
 from typing import Optional
-from .models import FileRecord
+from .models import FileRecord, FolderRecord
 
 DB_PATH = Path(os.getenv("VAULT_DB_PATH", "vault.db"))
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    folder_id      INTEGER,
     name           TEXT    NOT NULL,
     size           INTEGER NOT NULL,
     mime_type      TEXT,
     tg_file_id     TEXT    NOT NULL,
+    tg_thumb_file_id TEXT,
     tg_message_id  INTEGER NOT NULL,
     uploaded_at    TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_name ON files(name);
 CREATE INDEX IF NOT EXISTS idx_date ON files(uploaded_at);
 CREATE INDEX IF NOT EXISTS idx_mime ON files(mime_type);
+CREATE TABLE IF NOT EXISTS folders (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id   INTEGER,
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
 """
 
 
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(_SCHEMA)
+        async with db.execute("PRAGMA table_info(files)") as cur:
+            columns = {row[1] for row in await cur.fetchall()}
+        if "tg_thumb_file_id" not in columns:
+            await db.execute("ALTER TABLE files ADD COLUMN tg_thumb_file_id TEXT")
+        if "folder_id" not in columns:
+            await db.execute("ALTER TABLE files ADD COLUMN folder_id INTEGER")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id)")
         await db.commit()
 
 
@@ -35,12 +51,14 @@ async def insert_file(
     tg_file_id: str,
     tg_message_id: int,
     uploaded_at: str,
+    tg_thumb_file_id: Optional[str] = None,
+    folder_id: Optional[int] = None,
 ) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO files (name, size, mime_type, tg_file_id, tg_message_id, uploaded_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (name, size, mime_type, tg_file_id, tg_message_id, uploaded_at),
+            "INSERT INTO files (folder_id, name, size, mime_type, tg_file_id, tg_thumb_file_id, tg_message_id, uploaded_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (folder_id, name, size, mime_type, tg_file_id, tg_thumb_file_id, tg_message_id, uploaded_at),
         )
         await db.commit()
         return cur.lastrowid
@@ -59,6 +77,7 @@ async def list_files(
     sort: str = "date",
     order: str = "desc",
     file_type: Optional[str] = None,
+    folder_id: Optional[int] = None,
 ) -> list[FileRecord]:
     col_map = {"name": "name", "date": "uploaded_at", "size": "size", "type": "mime_type"}
     sort_col = col_map.get(sort, "uploaded_at")
@@ -66,6 +85,11 @@ async def list_files(
     type_map = {"image": "image/%", "video": "video/%", "document": "application/%"}
 
     conds, params = [], []
+    if folder_id is None:
+        conds.append("folder_id IS NULL")
+    else:
+        conds.append("folder_id = ?")
+        params.append(folder_id)
     if q:
         conds.append("name LIKE ?")
         params.append(f"%{q}%")
@@ -82,6 +106,70 @@ async def list_files(
             return [FileRecord(**dict(r)) for r in await cur.fetchall()]
 
 
+async def create_folder(name: str, parent_id: Optional[int], created_at: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO folders (parent_id, name, created_at) VALUES (?, ?, ?)",
+            (parent_id, name, created_at),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_folder(folder_id: int) -> Optional[FolderRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM folders WHERE id = ?", (folder_id,)) as cur:
+            row = await cur.fetchone()
+            return FolderRecord(**dict(row)) if row else None
+
+
+async def list_folder_tree_ids(folder_id: int) -> list[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            WITH RECURSIVE tree(id) AS (
+                SELECT id FROM folders WHERE id = ?
+                UNION ALL
+                SELECT f.id FROM folders f JOIN tree t ON f.parent_id = t.id
+            )
+            SELECT id FROM tree ORDER BY id
+            """,
+            (folder_id,),
+        ) as cur:
+            return [row[0] for row in await cur.fetchall()]
+
+
+async def list_files_in_folder_tree(folder_id: int) -> list[FileRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            WITH RECURSIVE tree(id) AS (
+                SELECT id FROM folders WHERE id = ?
+                UNION ALL
+                SELECT f.id FROM folders f JOIN tree t ON f.parent_id = t.id
+            )
+            SELECT * FROM files WHERE folder_id IN (SELECT id FROM tree) ORDER BY uploaded_at ASC
+            """,
+            (folder_id,),
+        ) as cur:
+            return [FileRecord(**dict(r)) for r in await cur.fetchall()]
+
+
+async def list_folders(parent_id: Optional[int] = None) -> list[FolderRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if parent_id is None:
+            sql = "SELECT * FROM folders WHERE parent_id IS NULL ORDER BY name COLLATE NOCASE ASC"
+            params = ()
+        else:
+            sql = "SELECT * FROM folders WHERE parent_id = ? ORDER BY name COLLATE NOCASE ASC"
+            params = (parent_id,)
+        async with db.execute(sql, params) as cur:
+            return [FolderRecord(**dict(r)) for r in await cur.fetchall()]
+
+
 async def delete_file(file_id: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("DELETE FROM files WHERE id = ?", (file_id,))
@@ -95,6 +183,16 @@ async def bulk_delete_files(ids: list[int]) -> int:
     placeholders = ",".join("?" * len(ids))
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(f"DELETE FROM files WHERE id IN ({placeholders})", ids)
+        await db.commit()
+        return cur.rowcount
+
+
+async def delete_folders(ids: list[int]) -> int:
+    if not ids:
+        return 0
+    placeholders = ",".join("?" * len(ids))
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(f"DELETE FROM folders WHERE id IN ({placeholders})", ids)
         await db.commit()
         return cur.rowcount
 

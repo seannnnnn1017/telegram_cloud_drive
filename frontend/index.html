@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Vault — Files</title>
-<meta name="viewport" content="width=1440">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -28,9 +28,12 @@
   .brand{font-weight:500;letter-spacing:0.04em;font-size:14px}
   .brand small{color:var(--ink-3);font-weight:400;letter-spacing:0;margin-left:8px;font-size:12px}
   .head .grow{flex:1}
-  .upload-btn{display:flex;align-items:center;gap:8px;height:32px;padding:0 14px;border-radius:7px;background:var(--green);color:#001b0b;font-weight:500;font-size:13px;transition:background .12s}
+  .upload-actions{display:flex;align-items:center;gap:8px}
+  .upload-btn{display:flex;align-items:center;gap:8px;height:32px;padding:0 14px;border-radius:7px;background:var(--green);color:#001b0b;font-weight:500;font-size:13px;transition:background .12s;white-space:nowrap}
   .upload-btn:hover{background:var(--green-glow)}
-  #file-input{display:none}
+  .media-btn{background:var(--bg-1);border:1px solid var(--line);color:var(--ink-2)}
+  .media-btn:hover{background:rgba(255,255,255,0.05);color:var(--ink)}
+  #file-input,#media-input{display:none}
 
   /* Storage */
   .storage .label{font-size:12px;letter-spacing:0.18em;text-transform:uppercase;color:var(--ink-3)}
@@ -55,16 +58,22 @@
   .ico-btn:hover{color:var(--ink);border-color:var(--line-2)}
 
   /* File list */
-  .list{border-top:1px solid var(--line)}
-  .list-header{display:grid;grid-template-columns:20px 1fr 110px 130px 90px 32px;gap:16px;padding:10px 4px;border-bottom:1px solid var(--line);font-size:10.5px;letter-spacing:0.18em;text-transform:uppercase;color:var(--ink-3);font-weight:500}
-  .list-header span{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+  .list{border-top:1px solid var(--line);--name-col:minmax(180px,1fr);--type-col:110px;--date-col:130px;--size-col:90px;--list-cols:20px var(--name-col) var(--type-col) var(--date-col) var(--size-col) 32px}
+  .list-header{display:grid;grid-template-columns:var(--list-cols);gap:16px;padding:10px 4px;border-bottom:1px solid var(--line);font-size:10.5px;letter-spacing:0.18em;text-transform:uppercase;color:var(--ink-3);font-weight:500}
+  .list-header span{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;position:relative;min-width:0}
   .list-header span:hover{color:var(--ink-2)}
   .list-header span.sort-active{color:var(--ink-2)}
+  .resize-handle{position:absolute;right:-11px;top:-10px;width:8px;height:38px;cursor:col-resize;z-index:2}
+  .resize-handle::after{content:"";position:absolute;left:3px;top:9px;width:1px;height:20px;background:var(--line-2);opacity:0;transition:opacity .12s}
+  .list-header span:hover .resize-handle::after,.resize-handle:hover::after{opacity:1}
+  body.col-resizing{user-select:none;cursor:col-resize}
 
-  .row{display:grid;grid-template-columns:20px 1fr 110px 130px 90px 32px;gap:16px;align-items:center;padding:14px 4px;border-bottom:1px solid var(--line);font-size:13.5px;cursor:pointer;transition:background .12s;position:relative}
+  .row{display:grid;grid-template-columns:var(--list-cols);gap:16px;align-items:center;padding:14px 4px;border-bottom:1px solid var(--line);font-size:13.5px;cursor:pointer;transition:background .12s;position:relative}
   .row:hover{background:rgba(255,255,255,0.02)}
   .row:last-child{border-bottom:0}
   .row.selected{background:rgba(0,255,102,0.04)}
+  .selection-box{position:fixed;left:0;top:0;width:0;height:0;border:1px solid rgba(0,255,102,0.75);background:rgba(0,255,102,0.1);pointer-events:none;z-index:250;display:none}
+  body.box-selecting{user-select:none;cursor:crosshair}
 
   .cb{width:14px;height:14px;border-radius:3px;border:1px solid var(--line-2);background:transparent;cursor:pointer;accent-color:var(--green);flex-shrink:0}
 
@@ -82,6 +91,29 @@
   .more-btn{width:24px;height:24px;border-radius:5px;display:grid;place-items:center;color:var(--ink-3);opacity:0;transition:opacity .1s}
   .row:hover .more-btn{opacity:1}
   .more-btn:hover{background:rgba(255,255,255,0.05);color:var(--ink)}
+  .view-switch{display:flex;gap:4px;border:1px solid var(--line);border-radius:7px;padding:2px;background:var(--bg-1)}
+  .view-btn{height:26px;padding:0 9px;border-radius:5px;color:var(--ink-3);font-size:12px}
+  .view-btn:hover{color:var(--ink-2)}
+  .view-btn.on{background:rgba(255,255,255,0.06);color:var(--ink)}
+  .file-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(116px,1fr));gap:10px;padding-top:14px}
+  .file-grid.preview-grid{grid-template-columns:repeat(auto-fill,minmax(168px,1fr))}
+  .file-card{position:relative;border:1px solid var(--line);border-radius:8px;background:var(--bg-1);cursor:pointer;overflow:hidden;min-width:0;transition:border-color .12s,background .12s}
+  .file-card:hover{border-color:var(--line-2);background:rgba(255,255,255,0.025)}
+  .file-card.selected{border-color:rgba(0,255,102,0.55);background:rgba(0,255,102,0.04)}
+  .folder-row,.folder-card{border-color:rgba(0,255,102,0.14)}
+  .file-card .cb{position:absolute;left:8px;top:8px;z-index:2}
+  .file-card .more-btn{position:absolute;right:7px;top:7px;opacity:1;background:rgba(0,0,0,0.22);z-index:2}
+  .icon-tile{height:82px;display:grid;place-items:center;color:var(--ink-2)}
+  .icon-tile .ic{width:42px;height:42px}
+  .thumb-tile{height:116px;background:#111;display:grid;place-items:center;overflow:hidden;color:var(--ink-3)}
+  .thumb-tile img{width:100%;height:100%;object-fit:cover;display:block}
+  .thumb-tile .ic{width:40px;height:40px}
+  .card-info{padding:9px 10px 10px;min-width:0}
+  .card-info .fname{font-size:12.5px}
+  .card-info .fmeta{font-size:10px}
+  .pathbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:-22px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--ink-3)}
+  .pathbar button{color:var(--ink-2);padding:4px 6px;border-radius:5px}
+  .pathbar button:hover{background:rgba(255,255,255,0.05);color:var(--ink)}
 
   /* Context menu */
   .ctx-menu{position:fixed;background:var(--bg-1);border:1px solid var(--line-2);border-radius:9px;padding:4px;min-width:160px;z-index:100;box-shadow:0 8px 32px rgba(0,0,0,0.6)}
@@ -96,6 +128,7 @@
   .bulk-bar .count{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--ink-3)}
   .bulk-bar .gap{flex:1}
   .bulk-btn{padding:6px 14px;border-radius:7px;font-size:12.5px;font-weight:500}
+  .bulk-btn:disabled{opacity:.45;cursor:wait;pointer-events:none}
   .bulk-btn.del{background:rgba(255,107,107,0.12);color:#ff6b6b}
   .bulk-btn.del:hover{background:rgba(255,107,107,0.2)}
   .bulk-btn.cancel{color:var(--ink-3)}
@@ -135,6 +168,31 @@
   .foot .live{color:var(--green);display:flex;align-items:center;gap:8px}
   .foot .live::before{content:"";width:5px;height:5px;border-radius:99px;background:var(--green);box-shadow:0 0 10px var(--green);animation:pulse 1.6s infinite}
   @keyframes pulse{50%{opacity:.4}}
+  @media (max-width: 720px) {
+    .wrap{padding:28px 14px 96px;gap:24px}
+    .head{flex-wrap:wrap;gap:10px}
+    .head .grow{flex-basis:100%;height:0}
+    .upload-actions{width:100%;display:grid;grid-template-columns:1fr 1fr}
+    .head .upload-btn{height:38px;justify-content:center;flex:1}
+    .storage .num{font-size:34px}
+    .toolbar{align-items:stretch}
+    .search{max-width:none;flex-basis:100%}
+    .toolbar .grow{display:none}
+    .view-switch,.tabs{width:100%;overflow-x:auto}
+    .tab,.view-btn{flex:1;text-align:center;white-space:nowrap}
+    .list{--name-col:minmax(0,1fr);--type-col:0px;--date-col:96px;--size-col:72px;--list-cols:20px var(--name-col) var(--date-col) var(--size-col) 28px}
+    .list-header{grid-template-columns:var(--list-cols);gap:10px}
+    .list-header span:nth-child(3){display:none}
+    .row{grid-template-columns:var(--list-cols);gap:10px;padding:13px 2px}
+    .row .col.dim{display:none}
+    .ic{width:28px;height:28px}
+    .file-grid{grid-template-columns:repeat(auto-fill,minmax(104px,1fr))}
+    .file-grid.preview-grid{grid-template-columns:repeat(auto-fill,minmax(142px,1fr))}
+    .bulk-bar{left:12px;right:12px;bottom:18px;transform:none;justify-content:space-between;overflow-x:auto}
+    .bulk-bar.show{transform:none}
+    .bulk-bar .gap{display:none}
+    .toast-area{left:12px;right:12px;top:12px}
+  }
 </style>
 </head>
 <body>
@@ -151,6 +209,7 @@
   <symbol id="i-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12l7 7 7-7"/></symbol>
   <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></symbol>
   <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M6 16H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
   <symbol id="i-dots" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></symbol>
   <symbol id="i-arrow-d" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></symbol>
   <symbol id="i-arrow-u" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m6 15 6-6 6 6"/></symbol>
@@ -175,12 +234,16 @@
 
 <!-- Context Menu -->
 <div class="ctx-menu" id="ctx-menu" style="display:none"></div>
+<div class="selection-box" id="selection-box"></div>
 
 <!-- Bulk Bar -->
 <div class="bulk-bar" id="bulk-bar">
   <span class="count" id="bulk-count">0 selected</span>
   <span class="gap"></span>
   <button class="bulk-btn cancel" id="bulk-cancel">取消</button>
+  <button class="bulk-btn" id="bulk-download">
+    <svg width="12" height="12"><use href="#i-down"/></svg> Download
+  </button>
   <button class="bulk-btn del" id="bulk-del">
     <svg width="12" height="12"><use href="#i-trash"/></svg> 刪除全部
   </button>
@@ -203,7 +266,16 @@
       <svg width="13" height="13"><use href="#i-up"/></svg>
       上傳
     </button>
+    <button class="upload-btn media-btn" id="media-btn">
+      <svg width="13" height="13"><use href="#i-img"/></svg>
+      Media
+    </button>
+    <button class="upload-btn media-btn" id="folder-btn">
+      <svg width="13" height="13"><use href="#i-folder"/></svg>
+      Folder
+    </button>
     <input type="file" id="file-input" multiple>
+    <input type="file" id="media-input" accept="image/*,video/*" multiple>
   </header>
 
   <section class="storage">
@@ -212,12 +284,19 @@
     <div class="bar"><i id="storage-bar" style="width:0%"></i></div>
   </section>
 
+  <nav class="pathbar" id="pathbar"></nav>
+
   <section class="toolbar">
     <div class="search">
       <svg width="13" height="13" style="color:var(--ink-3)"><use href="#i-search"/></svg>
       <input id="search-input" placeholder="搜尋檔案…" autocomplete="off">
     </div>
     <div class="grow"></div>
+    <div class="view-switch" id="view-switch">
+      <button class="view-btn on" data-view="list">List</button>
+      <button class="view-btn" data-view="icon">Icon</button>
+      <button class="view-btn" data-view="preview">Preview</button>
+    </div>
     <div class="tabs" id="tabs">
       <span class="tab on" data-type="">全部<span class="c" id="cnt-all">0</span></span>
       <span class="tab" data-type="image">圖片<span class="c" id="cnt-img">0</span></span>
@@ -248,12 +327,17 @@
 <script>
 const state = {
   files: [],
+  folders: [],
   allFiles: [],
   selected: new Set(),
+  selectedFolders: new Set(),
+  folderId: null,
+  folderStack: [],
   sort: 'date',
   order: 'desc',
   type: '',
   q: '',
+  view: localStorage.getItem('vault-view-mode') || 'list',
 };
 
 function esc(str) {
@@ -296,7 +380,12 @@ function mimeLabel(mime) {
 }
 
 function isPreviewable(mime) {
-  return mime && (mime.startsWith('image/') || mime === 'application/pdf');
+  return mime && (mime.startsWith('image/') || mime.startsWith('video/') || mime === 'application/pdf');
+}
+
+function canUseThumbnail(file) {
+  const mime = file.mime_type || '';
+  return file.has_thumbnail || mime.startsWith('image/');
 }
 
 function toast(msg, isErr = false) {
@@ -344,6 +433,8 @@ function showPreview(file) {
   let inner = '';
   if (file.mime_type && file.mime_type.startsWith('image/')) {
     inner = `<img src="/api/files/${file.id}/preview" alt="${esc(file.name)}">`;
+  } else if (file.mime_type && file.mime_type.startsWith('video/')) {
+    inner = `<video src="/api/files/${file.id}/preview" controls preload="metadata" style="max-width:85vw;max-height:85vh;display:block"></video>`;
   } else if (file.mime_type === 'application/pdf') {
     inner = `<iframe src="/api/files/${file.id}/preview" title="${esc(file.name)}"></iframe>`;
   }
@@ -372,32 +463,100 @@ async function doDelete(id) {
 
 function updateBulkBar() {
   const bar = document.getElementById('bulk-bar');
-  const n = state.selected.size;
+  const n = state.selected.size + state.selectedFolders.size;
   document.getElementById('bulk-count').textContent = `已選 ${n} 個`;
   bar.classList.toggle('show', n > 0);
 }
 
+function renderPathbar() {
+  const bar = document.getElementById('pathbar');
+  const parts = [`<button data-folder-jump="-1">Root</button>`];
+  state.folderStack.forEach((folder, idx) => {
+    parts.push(`<span>/</span><button data-folder-jump="${idx}">${esc(folder.name)}</button>`);
+  });
+  bar.innerHTML = parts.join('');
+}
+
+document.getElementById('pathbar').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-folder-jump]');
+  if (!btn) return;
+  const idx = Number(btn.dataset.folderJump);
+  if (idx < 0) {
+    state.folderId = null;
+    state.folderStack = [];
+  } else {
+    state.folderStack = state.folderStack.slice(0, idx + 1);
+    state.folderId = state.folderStack[idx].id;
+  }
+  state.selected.clear();
+  loadFiles();
+});
+
 document.getElementById('bulk-cancel').onclick = () => {
   state.selected.clear();
+  state.selectedFolders.clear();
   renderFiles();
 };
 
-document.getElementById('bulk-del').onclick = async () => {
-  if (!confirm(`確定要刪除 ${state.selected.size} 個檔案嗎？`)) return;
+document.getElementById('bulk-download').onclick = async () => {
   const ids = Array.from(state.selected);
-  const r = await fetch('/api/files/bulk-delete', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ids }),
-  });
-  if (r.ok) {
-    const data = await r.json();
-    toast(`已刪除 ${data.deleted} 個檔案`);
-    state.selected.clear();
-    loadFiles();
-  } else {
-    toast('批次刪除失敗', true);
+  if (!ids.length) return;
+  const btn = document.getElementById('bulk-download');
+  if (btn.disabled) return;
+  const label = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = 'Preparing...';
+  try {
+    const r = await fetch('/api/files/bulk-download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    if (!r.ok) {
+      try { toast((await r.json()).detail || 'Download failed', true); }
+      catch { toast('Download failed', true); }
+      return;
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'vault-selection.zip';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast(`Downloading ${ids.length} files`);
+  } catch {
+    toast('Download failed', true);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = label;
   }
+};
+
+document.getElementById('bulk-del').onclick = async () => {
+  const fileIds = Array.from(state.selected);
+  const folderIds = Array.from(state.selectedFolders);
+  const total = fileIds.length + folderIds.length;
+  if (!total) return;
+  if (!confirm(`確定要刪除 ${total} 個項目嗎？`)) return;
+  let deleted = 0;
+  if (fileIds.length) {
+    const r = await fetch('/api/files/bulk-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: fileIds }),
+    });
+    if (r.ok) { const d = await r.json(); deleted += d.deleted || 0; }
+    else { toast('批次刪除失敗', true); }
+  }
+  for (const id of folderIds) {
+    const r = await fetch(`/api/folders/${id}`, { method: 'DELETE' });
+    if (r.ok) deleted++;
+  }
+  toast(`已刪除 ${deleted} 個項目`);
+  state.selected.clear();
+  state.selectedFolders.clear();
+  loadFiles();
 };
 
 async function uploadFile(file) {
@@ -412,6 +571,7 @@ async function uploadFile(file) {
   const xhr = new XMLHttpRequest();
   const form = new FormData();
   form.append('file', file);
+  if (state.folderId !== null) form.append('folder_id', state.folderId);
 
   await new Promise((resolve) => {
     xhr.upload.addEventListener('progress', (e) => {
@@ -434,9 +594,109 @@ async function uploadFile(file) {
   });
 }
 
+async function uploadFiles(files) {
+  const queue = Array.from(files);
+  const concurrency = 3;
+  let next = 0;
+  async function worker() {
+    while (next < queue.length) {
+      const file = queue[next++];
+      await uploadFile(file);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, queue.length) }, () => worker())
+  );
+  loadFiles();
+  loadStorage();
+}
+
+async function uploadFileTracked(file) {
+  const MAX = 20 * 1024 * 1024;
+  if (file.size > MAX) {
+    toast(`${file.name} exceeds the 20 MB limit`, true);
+    return false;
+  }
+
+  const toastEl = document.getElementById('upload-toast');
+  document.getElementById('ut-name').textContent = file.name;
+  document.getElementById('ut-prog').style.width = '0%';
+  toastEl.classList.add('show');
+
+  const xhr = new XMLHttpRequest();
+  const form = new FormData();
+  form.append('file', file);
+  if (state.folderId !== null) form.append('folder_id', state.folderId);
+
+  return await new Promise((resolve) => {
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        document.getElementById('ut-prog').style.width = `${(e.loaded / e.total * 100).toFixed(0)}%`;
+      }
+    });
+    xhr.onload = () => {
+      toastEl.classList.remove('show');
+      if (xhr.status === 201) {
+        toast(`${file.name} uploaded`);
+        resolve(true);
+      } else {
+        try { toast(JSON.parse(xhr.responseText).detail || 'Upload failed', true); }
+        catch { toast('Upload failed', true); }
+        resolve(false);
+      }
+    };
+    xhr.onerror = () => { toastEl.classList.remove('show'); toast('Network error', true); resolve(false); };
+    xhr.open('POST', '/api/upload');
+    xhr.send(form);
+  });
+}
+
+async function uploadFilesTracked(files) {
+  const queue = Array.from(files);
+  if (!queue.length) return;
+  const concurrency = 3;
+  let next = 0;
+  let ok = 0;
+  let failed = 0;
+  async function worker() {
+    while (next < queue.length) {
+      const file = queue[next++];
+      if (await uploadFileTracked(file)) ok++;
+      else failed++;
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, queue.length) }, () => worker())
+  );
+  loadFiles();
+  loadStorage();
+  if (queue.length > 1) {
+    toast(`Upload finished: ${ok} ok, ${failed} failed`, failed > 0);
+  }
+}
+
 document.getElementById('upload-btn').onclick = () => document.getElementById('file-input').click();
+document.getElementById('media-btn').onclick = () => document.getElementById('media-input').click();
+document.getElementById('folder-btn').onclick = async () => {
+  const name = prompt('Folder name');
+  if (!name || !name.trim()) return;
+  const r = await fetch('/api/folders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name.trim(), parent_id: state.folderId }),
+  });
+  if (r.ok) loadFiles();
+  else {
+    try { toast((await r.json()).detail || 'Create folder failed', true); }
+    catch { toast('Create folder failed', true); }
+  }
+};
 document.getElementById('file-input').onchange = async (e) => {
-  for (const f of e.target.files) await uploadFile(f);
+  await uploadFilesTracked(e.target.files);
+  e.target.value = '';
+};
+document.getElementById('media-input').onchange = async (e) => {
+  await uploadFilesTracked(e.target.files);
   e.target.value = '';
 };
 
@@ -445,7 +705,7 @@ document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.g
 document.addEventListener('drop', async (e) => {
   e.preventDefault();
   document.getElementById('drop-overlay').classList.remove('show');
-  for (const f of e.dataTransfer.files) await uploadFile(f);
+  await uploadFilesTracked(e.dataTransfer.files);
 });
 
 function updateSortHeaders() {
@@ -467,6 +727,7 @@ function updateSortHeaders() {
 }
 
 document.querySelector('.list-header').addEventListener('click', (e) => {
+  if (e.target.closest('.resize-handle')) return;
   const col = e.target.closest('[data-sort]');
   if (!col) return;
   const key = col.dataset.sort;
@@ -485,24 +746,221 @@ document.getElementById('tabs').addEventListener('click', (e) => {
   loadFiles();
 });
 
+function syncViewButtons() {
+  document.querySelectorAll('.view-btn').forEach(btn => {
+    btn.classList.toggle('on', btn.dataset.view === state.view);
+  });
+}
+
+document.getElementById('view-switch').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-view]');
+  if (!btn) return;
+  state.view = btn.dataset.view;
+  localStorage.setItem('vault-view-mode', state.view);
+  syncViewButtons();
+  renderFiles();
+});
+
+syncViewButtons();
+
+let suppressNextRowClick = false;
+
+function rectsOverlap(a, b) {
+  return a.left <= b.right && a.right >= b.left && a.top <= b.bottom && a.bottom >= b.top;
+}
+
+function setRowSelection(row, selected) {
+  const id = parseInt(row.dataset.id);
+  if (selected) state.selected.add(id);
+  else state.selected.delete(id);
+  row.classList.toggle('selected', selected);
+  const cb = row.querySelector('[data-cb]');
+  if (cb) cb.checked = selected;
+}
+
+function setFolderSelection(row, id, selected) {
+  if (selected) state.selectedFolders.add(id);
+  else state.selectedFolders.delete(id);
+  row.classList.toggle('selected', selected);
+  const cb = row.querySelector('[data-cb-folder]');
+  if (cb) cb.checked = selected;
+}
+
+function updateBoxSelection(selectRect, baseSelection, baseFolderSelection, append) {
+  document.querySelectorAll('#file-list .file-item').forEach(row => {
+    const id = parseInt(row.dataset.id);
+    const hit = rectsOverlap(selectRect, row.getBoundingClientRect());
+    const selected = append ? baseSelection.has(id) || hit : hit;
+    setRowSelection(row, selected);
+  });
+  document.querySelectorAll('#file-list .folder-item').forEach(row => {
+    const id = parseInt(row.dataset.folderId);
+    const hit = rectsOverlap(selectRect, row.getBoundingClientRect());
+    const selected = append ? baseFolderSelection.has(id) || hit : hit;
+    setFolderSelection(row, id, selected);
+  });
+  updateBulkBar();
+}
+
+function installBoxSelection() {
+  const box = document.getElementById('selection-box');
+  let drag = null;
+
+  document.addEventListener('contextmenu', (e) => {
+    if (drag?.moved || e.target.closest('.wrap')) e.preventDefault();
+  });
+
+  document.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest('button,input,.tab,.list-header,.bulk-bar,.modal-bg,.ctx-menu,.upload-toast,.toast-area')) return;
+
+    closeCtx();
+    drag = {
+      x: e.clientX,
+      y: e.clientY,
+      moved: false,
+      append: e.ctrlKey || e.metaKey,
+      baseSelection: new Set(state.selected),
+      baseFolderSelection: new Set(state.selectedFolders),
+    };
+    if (!drag.append) { state.selected.clear(); state.selectedFolders.clear(); }
+    e.preventDefault();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!drag) return;
+    const left = Math.min(drag.x, e.clientX);
+    const top = Math.min(drag.y, e.clientY);
+    const width = Math.abs(e.clientX - drag.x);
+    const height = Math.abs(e.clientY - drag.y);
+
+    if (!drag.moved && width + height < 4) return;
+    drag.moved = true;
+    suppressNextRowClick = true;
+    document.body.classList.add('box-selecting');
+    Object.assign(box.style, {
+      display: 'block',
+      left: `${left}px`,
+      top: `${top}px`,
+      width: `${width}px`,
+      height: `${height}px`,
+    });
+    updateBoxSelection(
+      { left, top, right: left + width, bottom: top + height },
+      drag.baseSelection,
+      drag.baseFolderSelection,
+      drag.append
+    );
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!drag) return;
+    if (!drag.moved) {
+      if (!drag.append) {
+        state.selected = drag.baseSelection;
+        state.selectedFolders = drag.baseFolderSelection;
+      }
+    }
+    drag = null;
+    box.style.display = 'none';
+    document.body.classList.remove('box-selecting');
+    updateBulkBar();
+    setTimeout(() => { suppressNextRowClick = false; }, 0);
+  });
+}
+
+installBoxSelection();
+
+function installColumnResize() {
+  const list = document.getElementById('file-list-section');
+  const storageKey = 'vault-column-widths';
+  const columns = {
+    name: { css: '--name-col', min: 180, max: 560 },
+    type: { css: '--type-col', min: 72, max: 220 },
+    date: { css: '--date-col', min: 92, max: 260 },
+    size: { css: '--size-col', min: 72, max: 180 },
+  };
+
+  function applySavedWidths() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) || '{}');
+      Object.entries(saved).forEach(([key, width]) => {
+        if (columns[key] && Number.isFinite(width)) {
+          list.style.setProperty(columns[key].css, `${width}px`);
+        }
+      });
+    } catch {}
+  }
+
+  function saveWidth(key, width) {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(storageKey) || '{}'); } catch {}
+    saved[key] = width;
+    localStorage.setItem(storageKey, JSON.stringify(saved));
+  }
+
+  function ensureHandles() {
+    Object.keys(columns).forEach(key => {
+      const header = document.getElementById(`h-${key}`);
+      if (!header || header.querySelector('.resize-handle')) return;
+      header.dataset.resizeCol = key;
+      const handle = document.createElement('i');
+      handle.className = 'resize-handle';
+      handle.dataset.resizeHandle = key;
+      header.append(handle);
+    });
+  }
+
+  applySavedWidths();
+  ensureHandles();
+
+  document.querySelector('.list-header').addEventListener('mousedown', (e) => {
+    const handle = e.target.closest('.resize-handle');
+    if (!handle) return;
+    const key = handle.dataset.resizeHandle;
+    const col = columns[key];
+    const header = document.getElementById(`h-${key}`);
+    if (!col || !header) return;
+
+    const startX = e.clientX;
+    const startWidth = header.getBoundingClientRect().width;
+    document.body.classList.add('col-resizing');
+    e.preventDefault();
+    e.stopPropagation();
+
+    function onMove(ev) {
+      const width = Math.max(col.min, Math.min(col.max, Math.round(startWidth + ev.clientX - startX)));
+      list.style.setProperty(col.css, `${width}px`);
+    }
+
+    function onUp(ev) {
+      const width = Math.max(col.min, Math.min(col.max, Math.round(startWidth + ev.clientX - startX)));
+      list.style.setProperty(col.css, `${width}px`);
+      saveWidth(key, width);
+      document.body.classList.remove('col-resizing');
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    }
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  });
+}
+
+installColumnResize();
+
 let searchTimer;
 document.getElementById('search-input').addEventListener('input', (e) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => { state.q = e.target.value.trim(); loadFiles(); }, 250);
 });
 
-function renderFiles() {
-  const list = document.getElementById('file-list');
-  if (state.files.length === 0) {
-    list.innerHTML = '<div class="empty">沒有檔案</div>';
-    updateBulkBar();
-    return;
-  }
-  list.innerHTML = state.files.map(f => {
-    const icon = mimeIcon(f.mime_type);
-    const sel = state.selected.has(f.id);
+function fileItemMarkup(f) {
+  const icon = mimeIcon(f.mime_type);
+  const sel = state.selected.has(f.id);
+  if (state.view === 'list') {
     return `
-    <div class="row${sel ? ' selected' : ''}" data-id="${f.id}">
+    <div class="row file-item${sel ? ' selected' : ''}" data-id="${f.id}">
       <input type="checkbox" class="cb" data-cb="${f.id}" ${sel ? 'checked' : ''}>
       <div class="name-cell">
         <div class="ic ${icon}"><svg width="14" height="14"><use href="#i-${icon}"/></svg></div>
@@ -516,9 +974,113 @@ function renderFiles() {
       <div class="col size">${fmtSize(f.size)}</div>
       <button class="more-btn" data-more="${f.id}"><svg width="14" height="14"><use href="#i-dots"/></svg></button>
     </div>`;
-  }).join('');
+  }
 
-  list.querySelectorAll('.row').forEach(row => {
+  const thumb = state.view === 'preview' && canUseThumbnail(f)
+    ? `<img src="/api/files/${f.id}/thumbnail" alt="${esc(f.name)}" loading="lazy" onerror="this.replaceWith(this.nextElementSibling)"><div class="ic ${icon}"><svg width="18" height="18"><use href="#i-${icon}"/></svg></div>`
+    : `<div class="ic ${icon}"><svg width="20" height="20"><use href="#i-${icon}"/></svg></div>`;
+  return `
+    <div class="file-card file-item${sel ? ' selected' : ''}" data-id="${f.id}">
+      <input type="checkbox" class="cb" data-cb="${f.id}" ${sel ? 'checked' : ''}>
+      <button class="more-btn" data-more="${f.id}"><svg width="14" height="14"><use href="#i-dots"/></svg></button>
+      <div class="${state.view === 'preview' ? 'thumb-tile' : 'icon-tile'}">${thumb}</div>
+      <div class="card-info">
+        <div class="fname">${esc(f.name)}</div>
+        <span class="fmeta">${fmtSize(f.size)} · ${mimeLabel(f.mime_type)}</span>
+      </div>
+    </div>`;
+}
+
+function folderItemMarkup(folder) {
+  const sel = state.selectedFolders.has(folder.id);
+  if (state.view === 'list') {
+    return `
+    <div class="row folder-row folder-item${sel ? ' selected' : ''}" data-folder-id="${folder.id}">
+      <input type="checkbox" class="cb" data-cb-folder="${folder.id}" ${sel ? 'checked' : ''}>
+      <div class="name-cell">
+        <div class="ic folder"><svg width="14" height="14"><use href="#i-folder"/></svg></div>
+        <div>
+          <div class="fname">${esc(folder.name)}</div>
+          <span class="fmeta">Folder</span>
+        </div>
+      </div>
+      <div class="col dim">FOLDER</div>
+      <div class="col">${fmtDate(folder.created_at)}</div>
+      <div class="col size">--</div>
+      <button class="more-btn" data-more-folder="${folder.id}"><svg width="14" height="14"><use href="#i-dots"/></svg></button>
+    </div>`;
+  }
+  return `
+    <div class="file-card folder-card folder-item${sel ? ' selected' : ''}" data-folder-id="${folder.id}">
+      <input type="checkbox" class="cb" data-cb-folder="${folder.id}" ${sel ? 'checked' : ''}>
+      <button class="more-btn" data-more-folder="${folder.id}"><svg width="14" height="14"><use href="#i-dots"/></svg></button>
+      <div class="${state.view === 'preview' ? 'thumb-tile' : 'icon-tile'}">
+        <div class="ic folder"><svg width="20" height="20"><use href="#i-folder"/></svg></div>
+      </div>
+      <div class="card-info">
+        <div class="fname">${esc(folder.name)}</div>
+        <span class="fmeta">Folder</span>
+      </div>
+    </div>`;
+}
+
+function attachFolderHandlers(list) {
+  list.querySelectorAll('[data-folder-id]').forEach(item => {
+    const id = parseInt(item.dataset.folderId);
+    const folder = state.folders.find(f => f.id === id);
+    if (!folder) return;
+
+    const cb = item.querySelector('[data-cb-folder]');
+    if (cb) {
+      cb.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const nowSel = !state.selectedFolders.has(id);
+        setFolderSelection(item, id, nowSel);
+        updateBulkBar();
+      });
+    }
+
+    const moreBtn = item.querySelector('[data-more-folder]');
+    if (moreBtn) {
+      moreBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showCtx(e, { kind: 'folder', folder });
+      });
+    }
+
+    item.addEventListener('click', (e) => {
+      if (suppressNextRowClick) return;
+      if (e.target.closest('[data-cb-folder]') || e.target.closest('[data-more-folder]')) return;
+      const totalSel = state.selected.size + state.selectedFolders.size;
+      if (totalSel > 0) {
+        const nowSel = !state.selectedFolders.has(id);
+        setFolderSelection(item, id, nowSel);
+        updateBulkBar();
+      } else {
+        state.folderId = folder.id;
+        state.folderStack.push({ id: folder.id, name: folder.name });
+        state.selected.clear();
+        state.selectedFolders.clear();
+        loadFiles();
+      }
+    });
+  });
+}
+
+function renderFiles() {
+  const list = document.getElementById('file-list');
+  if (state.files.length === 0 && state.folders.length === 0) {
+    list.className = '';
+    list.innerHTML = '<div class="empty">沒有檔案</div>';
+    updateBulkBar();
+    renderPathbar();
+    return;
+  }
+  list.className = state.view === 'list' ? '' : `file-grid ${state.view === 'preview' ? 'preview-grid' : ''}`;
+  list.innerHTML = state.folders.map(folderItemMarkup).join('') + state.files.map(fileItemMarkup).join('');
+  attachFolderHandlers(list);
+
+  list.querySelectorAll('.file-item').forEach(row => {
     const id = parseInt(row.dataset.id);
     const file = state.files.find(f => f.id === id);
 
@@ -537,6 +1099,7 @@ function renderFiles() {
     });
 
     row.addEventListener('click', (e) => {
+      if (suppressNextRowClick) return;
       if (e.target.closest('[data-cb]') || e.target.closest('[data-more]')) return;
       if (state.selected.size > 0) {
         if (state.selected.has(id)) state.selected.delete(id);
@@ -553,6 +1116,7 @@ function renderFiles() {
 
   updateBulkBar();
   updateSortHeaders();
+  renderPathbar();
 }
 
 function updateCounts(files) {
@@ -582,10 +1146,17 @@ async function loadFiles() {
   const params = new URLSearchParams({ sort: state.sort, order: state.order });
   if (state.q) params.set('q', state.q);
   if (state.type) params.set('type', state.type);
+  if (state.folderId !== null) params.set('folder_id', state.folderId);
+  const folderParams = new URLSearchParams();
+  if (state.folderId !== null) folderParams.set('parent_id', state.folderId);
 
   try {
-    const r = await fetch(`/api/files?${params}`);
+    const [r, folderRes] = await Promise.all([
+      fetch(`/api/files?${params}`),
+      fetch(`/api/folders?${folderParams}`),
+    ]);
     state.files = await r.json();
+    state.folders = await folderRes.json();
     if (state.type || state.q) {
       const all = await fetch('/api/files');
       state.allFiles = await all.json();
@@ -598,6 +1169,238 @@ async function loadFiles() {
   } catch {
     toast('無法連線到伺服器', true);
   }
+}
+
+let ctxBusy = false;
+let ctxTarget = null;
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Copied');
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.append(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    toast('Copied');
+  }
+}
+
+function fileDownloadUrl(file) {
+  return `${location.origin}/api/files/${file.id}/download`;
+}
+
+function folderPathLabel(folder = null) {
+  const parts = ['Root', ...state.folderStack.map(f => f.name)];
+  if (folder) parts.push(folder.name);
+  return parts.join(' / ');
+}
+
+function enterFolder(folder) {
+  state.folderId = folder.id;
+  state.folderStack.push({ id: folder.id, name: folder.name });
+  state.selected.clear();
+  loadFiles();
+}
+
+async function promptCreateFolder(parentId = state.folderId) {
+  const name = prompt('Folder name');
+  if (!name || !name.trim()) return;
+  const r = await fetch('/api/folders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name.trim(), parent_id: parentId }),
+  });
+  if (r.ok) loadFiles();
+  else {
+    try { toast((await r.json()).detail || 'Create folder failed', true); }
+    catch { toast('Create folder failed', true); }
+  }
+}
+
+async function deleteSelectedFiles() {
+  const fileIds = Array.from(state.selected);
+  const folderIds = Array.from(state.selectedFolders);
+  const total = fileIds.length + folderIds.length;
+  if (!total) return;
+  if (!confirm(`Delete ${total} selected item(s)?`)) return;
+  let deleted = 0;
+  if (fileIds.length) {
+    const r = await fetch('/api/files/bulk-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: fileIds }),
+    });
+    if (r.ok) { const d = await r.json(); deleted += d.deleted || 0; }
+  }
+  for (const id of folderIds) {
+    const r = await fetch(`/api/folders/${id}`, { method: 'DELETE' });
+    if (r.ok) deleted++;
+  }
+  toast(`Deleted ${deleted} item(s)`);
+  state.selected.clear();
+  state.selectedFolders.clear();
+  loadFiles();
+}
+
+async function deleteFolder(folder) {
+  if (!folder) return;
+  if (!confirm(`Delete folder "${folder.name}" and all contents?`)) return;
+  const r = await fetch(`/api/folders/${folder.id}`, { method: 'DELETE' });
+  if (r.ok) {
+    const data = await r.json();
+    toast(`Deleted ${data.deleted_folders} folder(s), ${data.deleted_files} file(s)`);
+    state.selected.clear();
+    if (state.folderId === folder.id || state.folderStack.some(f => f.id === folder.id)) {
+      state.folderId = null;
+      state.folderStack = [];
+    }
+    loadFiles();
+  } else {
+    try { toast((await r.json()).detail || 'Folder delete failed', true); }
+    catch { toast('Folder delete failed', true); }
+  }
+}
+
+function closeCtx() {
+  const menu = document.getElementById('ctx-menu');
+  menu.style.display = 'none';
+  menu.innerHTML = '';
+  ctxOpen = false;
+  ctxBusy = false;
+  ctxTarget = null;
+}
+
+function renderCtxButton(action) {
+  const danger = action.danger ? ' danger' : '';
+  return `<button data-action="${action.key}" class="${danger.trim()}"><svg width="12" height="12"><use href="${action.icon}"/></svg> ${action.label}</button>`;
+}
+
+function showCtx(e, target) {
+  const menu = document.getElementById('ctx-menu');
+  let actions = [];
+  ctxTarget = target;
+
+  if (target?.kind === 'file') {
+    const file = target.file;
+    if (isPreviewable(file.mime_type)) {
+      actions.push({ key: 'preview', icon: '#i-eye', label: '預覽' });
+    }
+    actions.push(
+      { key: 'download', icon: '#i-down', label: '下載' },
+      { key: 'copy-link', icon: '#i-copy', label: '複製連結' },
+      { sep: true },
+      { key: 'delete-file', icon: '#i-trash', label: '刪除', danger: true }
+    );
+  } else if (target?.kind === 'selection') {
+    actions.push({ key: 'create-folder', icon: '#i-folder', label: '新增資料夾' });
+    const totalSel = state.selected.size + state.selectedFolders.size;
+    if (totalSel > 0) {
+      actions.push(
+        { key: 'download-selected', icon: '#i-down', label: '下載選取' },
+        { key: 'copy-selected', icon: '#i-copy', label: '複製連結' },
+        { sep: true },
+        { key: 'delete-selected', icon: '#i-trash', label: '刪除選取', danger: true }
+      );
+    }
+  } else if (target?.kind === 'folder') {
+    const folder = target.folder;
+    actions.push(
+      { key: 'open-folder', icon: '#i-folder', label: '開啟' },
+      { key: 'create-folder', icon: '#i-folder', label: '創資料夾' },
+      { key: 'copy-path', icon: '#i-copy', label: '複製路徑' },
+      { sep: true },
+      { key: 'delete-folder', icon: '#i-trash', label: '刪除資料夾', danger: true }
+    );
+  } else {
+    actions.push({ key: 'create-folder', icon: '#i-folder', label: '創資料夾' });
+    if (state.selected.size > 0) {
+      actions.push(
+        { key: 'download-selected', icon: '#i-down', label: '下載選取' },
+        { key: 'copy-selected', icon: '#i-copy', label: '複製連結' },
+        { sep: true },
+        { key: 'delete-selected', icon: '#i-trash', label: '刪除選取', danger: true }
+      );
+    }
+  }
+
+  menu.innerHTML = actions.map(a => a.sep ? '<div class="sep"></div>' : renderCtxButton(a)).join('');
+  if (!menu.innerHTML) return;
+  menu.style.display = 'block';
+  const x = Math.min(e.clientX, window.innerWidth - 220);
+  const y = Math.min(e.clientY, window.innerHeight - (actions.length * 38 + 16));
+  menu.style.left = `${Math.max(8, x)}px`;
+  menu.style.top = `${Math.max(8, y)}px`;
+  ctxOpen = true;
+}
+
+async function runCtxAction(action) {
+  if (ctxBusy) return;
+  ctxBusy = true;
+  try {
+    if (action === 'preview' && ctxTarget?.kind === 'file') showPreview(ctxTarget.file);
+    else if (action === 'download' && ctxTarget?.kind === 'file') doDownload(ctxTarget.file);
+    else if (action === 'copy-link' && ctxTarget?.kind === 'file') await copyText(fileDownloadUrl(ctxTarget.file));
+    else if (action === 'delete-file' && ctxTarget?.kind === 'file') await doDelete(ctxTarget.file.id);
+    else if (action === 'open-folder' && ctxTarget?.kind === 'folder') enterFolder(ctxTarget.folder);
+    else if (action === 'create-folder') await promptCreateFolder(ctxTarget?.kind === 'folder' ? ctxTarget.folder.id : state.folderId);
+    else if (action === 'copy-path' && ctxTarget?.kind === 'folder') await copyText(folderPathLabel(ctxTarget.folder));
+    else if (action === 'delete-folder' && ctxTarget?.kind === 'folder') await deleteFolder(ctxTarget.folder);
+    else if (action === 'download-selected') document.getElementById('bulk-download').click();
+    else if (action === 'copy-selected') {
+      const links = Array.from(state.selected)
+        .map(id => state.files.find(f => f.id === id))
+        .filter(Boolean)
+        .map(file => fileDownloadUrl(file))
+        .join('\n');
+      if (links) await copyText(links);
+    } else if (action === 'delete-selected') await deleteSelectedFiles();
+  } finally {
+    closeCtx();
+  }
+}
+
+document.getElementById('ctx-menu').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  await runCtxAction(btn.dataset.action);
+});
+
+document.getElementById('file-list').addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  if (e.target.closest('.ctx-menu')) return;
+  const fileEl = e.target.closest('.file-item');
+  const folderEl = e.target.closest('[data-folder-id]');
+  if (fileEl) {
+    const id = parseInt(fileEl.dataset.id);
+    const file = state.files.find(f => f.id === id);
+    if (!file) return;
+    const totalSel = state.selected.size + state.selectedFolders.size;
+    if (totalSel > 0 && state.selected.has(id)) showCtx(e, { kind: 'selection' });
+    else showCtx(e, { kind: 'file', file });
+    return;
+  }
+  if (folderEl) {
+    const id = parseInt(folderEl.dataset.folderId);
+    const folder = state.folders.find(f => f.id === id);
+    if (!folder) return;
+    const totalSel = state.selected.size + state.selectedFolders.size;
+    if (totalSel > 0 && state.selectedFolders.has(id)) showCtx(e, { kind: 'selection' });
+    else showCtx(e, { kind: 'folder', folder });
+    return;
+  }
+  if (e.target.closest('#file-list')) showCtx(e, { kind: 'background' });
+});
+
+function openCtx(e, file) {
+  showCtx(e, { kind: 'file', file });
 }
 
 loadFiles();
