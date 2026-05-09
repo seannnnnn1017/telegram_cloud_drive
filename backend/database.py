@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS files (
     tg_thumb_file_id TEXT,
     tg_message_id  INTEGER NOT NULL,
     uploaded_at    TEXT    NOT NULL,
-    encrypted      INTEGER NOT NULL DEFAULT 0
+    encrypted      INTEGER NOT NULL DEFAULT 0,
+    uid            TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_name ON files(name);
 CREATE INDEX IF NOT EXISTS idx_date ON files(uploaded_at);
@@ -49,7 +50,10 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE files ADD COLUMN folder_id INTEGER")
         if "encrypted" not in columns:
             await db.execute("ALTER TABLE files ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0")
+        if "uid" not in columns:
+            await db.execute("ALTER TABLE files ADD COLUMN uid TEXT")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_files_uid ON files(uid)")
         await db.execute(
             "CREATE TABLE IF NOT EXISTS shares (token TEXT PRIMARY KEY, file_id INTEGER NOT NULL, expires_at TEXT)"
         )
@@ -67,12 +71,13 @@ async def insert_file(
     tg_thumb_file_id: Optional[str] = None,
     folder_id: Optional[int] = None,
     encrypted: bool = False,
+    uid: Optional[str] = None,
 ) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO files (folder_id, name, size, mime_type, tg_file_id, tg_thumb_file_id, tg_message_id, uploaded_at, encrypted)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (folder_id, name, size, mime_type, tg_file_id, tg_thumb_file_id, tg_message_id, uploaded_at, int(encrypted)),
+            "INSERT INTO files (folder_id, name, size, mime_type, tg_file_id, tg_thumb_file_id, tg_message_id, uploaded_at, encrypted, uid)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (folder_id, name, size, mime_type, tg_file_id, tg_thumb_file_id, tg_message_id, uploaded_at, int(encrypted), uid),
         )
         await db.commit()
         return cur.lastrowid
@@ -238,9 +243,32 @@ async def delete_folders(ids: list[int]) -> int:
         return cur.rowcount
 
 
+async def get_folder_path(folder_id: int) -> list[str]:
+    """Return folder names from root to leaf for the given folder_id."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        path: list[str] = []
+        current_id: Optional[int] = folder_id
+        while current_id is not None:
+            async with db.execute(
+                "SELECT id, parent_id, name FROM folders WHERE id = ?", (current_id,)
+            ) as cur:
+                row = await cur.fetchone()
+                if row is None:
+                    break
+                path.append(row[2])
+                current_id = row[1]
+        return list(reversed(path))
+
+
 async def list_all_message_ids() -> set[int]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT tg_message_id FROM files") as cur:
+            return {row[0] for row in await cur.fetchall()}
+
+
+async def list_all_uids() -> set[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT uid FROM files WHERE uid IS NOT NULL") as cur:
             return {row[0] for row in await cur.fetchall()}
 
 

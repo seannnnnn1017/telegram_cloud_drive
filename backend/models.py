@@ -15,6 +15,7 @@ class FileRecord(BaseModel):
     tg_message_id: int
     uploaded_at: datetime
     encrypted: bool = False
+    uid: Optional[str] = None
 
 
 class FileResponse(BaseModel):

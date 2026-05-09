@@ -27,6 +27,7 @@ from .database import (
     get_file,
     get_folder,
     get_folder_by_name,
+    get_folder_path,
     get_share,
     get_storage_stats,
     init_db,
@@ -57,7 +58,7 @@ from .models import (
     TelegramSettingsRequest,
     TelegramSettingsResponse,
 )
-from .sync import make_caption, sync_from_telegram
+from .sync import make_caption, start_sync_listener, sync_from_telegram
 from .telegram import TelegramClient
 
 load_dotenv()
@@ -237,6 +238,7 @@ async def ingest_telegram_message(tg: TelegramClient, message: dict) -> bool:
     return True
 
 
+
 async def poll_telegram_uploads(tg: TelegramClient) -> None:
     allowed_chats = parse_allowed_ingest_chats()
     updates = await tg.get_updates(timeout=0)
@@ -265,8 +267,11 @@ async def lifespan(app: FastAPI):
     await init_db()
     app.state.tg_client = build_tg_client()
     app.state.tg_poll_task = None
+    app.state.tg_sync_task = None
     if os.getenv("TELEGRAM_INGEST_UPDATES", "true").lower() in {"1", "true", "yes", "on"}:
         app.state.tg_poll_task = asyncio.create_task(poll_telegram_uploads(app.state.tg_client))
+    if os.getenv("TG_SESSION_STRING", "").strip():
+        app.state.tg_sync_task = asyncio.create_task(start_sync_listener())
     try:
         yield
     finally:
@@ -274,6 +279,10 @@ async def lifespan(app: FastAPI):
             app.state.tg_poll_task.cancel()
             with suppress(asyncio.CancelledError):
                 await app.state.tg_poll_task
+        if app.state.tg_sync_task is not None:
+            app.state.tg_sync_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await app.state.tg_sync_task
         await app.state.tg_client.aclose()
 
 
@@ -491,13 +500,21 @@ async def api_upload(
     tg = get_tg_client()
     stored_mime_type = original_mime_type if encrypted and original_mime_type else (file.content_type or "application/octet-stream")
     now = datetime.now(timezone.utc).isoformat()
+    file_uid = secrets.token_hex(8)
+    # Build full path for caption so sync can reconstruct folder hierarchy
+    caption_name = file.filename
+    if folder_id is not None:
+        parts = await get_folder_path(folder_id)
+        if parts:
+            caption_name = "/".join(parts) + "/" + file.filename
     # Embed metadata as caption so any device can sync from Telegram history
     caption = make_caption(
-        name=file.filename,
+        name=caption_name,
         size=len(content),
         mime_type=stored_mime_type,
         encrypted=encrypted,
         uploaded_at=now,
+        uid=file_uid,
     )
     tg_result = await tg.send_document(
         file.filename, content, file.content_type or "application/octet-stream",
@@ -514,6 +531,7 @@ async def api_upload(
         uploaded_at=now,
         folder_id=folder_id,
         encrypted=encrypted,
+        uid=file_uid,
     )
     record = await get_file(new_id)
     return file_response(record)

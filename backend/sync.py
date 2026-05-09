@@ -1,9 +1,18 @@
+import asyncio
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .database import insert_file, list_all_message_ids
+from .database import (
+    create_folder,
+    get_folder,
+    get_folder_by_name,
+    insert_file,
+    list_all_message_ids,
+    list_all_uids,
+)
 
 CAPTION_VERSION = 1
 
@@ -14,6 +23,7 @@ def make_caption(
     mime_type: Optional[str],
     encrypted: bool,
     uploaded_at: str,
+    uid: Optional[str] = None,
     tg_file_id: Optional[str] = None,
     tg_thumb_file_id: Optional[str] = None,
 ) -> str:
@@ -25,6 +35,8 @@ def make_caption(
         "e": int(encrypted),
         "t": uploaded_at,
     }
+    if uid:
+        data["id"] = uid
     if tg_file_id:
         data["f"] = tg_file_id
     if tg_thumb_file_id:
@@ -41,17 +53,155 @@ def parse_caption(text: str) -> Optional[dict]:
         return None
     if data.get("v") != CAPTION_VERSION:
         return None
-    # "f" (file_id) is optional — synced via pack_bot_file_id if absent
+    # "f" (file_id) and "id" (uid) are optional
     if not all(k in data for k in ("n", "s", "t")):
         return None
     return {
         "name": data["n"],
         "size": int(data["s"]),
         "mime_type": data.get("m") or None,
+        "uid": data.get("id") or None,
         "tg_file_id": data.get("f") or "",
         "tg_thumb_file_id": data.get("th"),
         "encrypted": bool(data.get("e", 0)),
         "uploaded_at": data["t"],
+    }
+
+
+async def _ensure_sync_folder_path(parts: list[str]) -> int:
+    """Get or create the nested folder hierarchy described by *parts*.
+
+    Returns the id of the leaf (innermost) folder.
+    """
+    parent_id: Optional[int] = None
+    for part in parts:
+        folder = await get_folder_by_name(part, parent_id)
+        if folder is None:
+            now = datetime.now(timezone.utc).isoformat()
+            folder_id = await create_folder(name=part, parent_id=parent_id, created_at=now)
+            folder = await get_folder(folder_id)
+        parent_id = folder.id
+    return parent_id  # type: ignore[return-value]
+
+
+async def _import_message(
+    message,
+    known_uids: Optional[set[str]] = None,
+    known_msg_ids: Optional[set[int]] = None,
+) -> bool:
+    """Try to import a single Telethon message into the DB.
+
+    *known_uids* / *known_msg_ids* are used for dedup; if None the DB is
+    queried fresh (suitable for the event handler where messages are rare).
+    Both sets are updated in-place when a record is inserted so that callers
+    iterating a batch don't re-import the same file.
+
+    Returns True if the message was inserted.
+    """
+    from telethon.utils import pack_bot_file_id
+
+    caption = message.message or ""
+    parsed = parse_caption(caption)
+    if parsed is None:
+        return False
+
+    if known_uids is None:
+        known_uids = await list_all_uids()
+    if known_msg_ids is None:
+        known_msg_ids = await list_all_message_ids()
+
+    uid = parsed["uid"]
+    # uid-based dedup (preferred); fall back to message_id for old-format captions
+    if uid:
+        if uid in known_uids:
+            return False
+    elif message.id in known_msg_ids:
+        return False
+
+    file_id = parsed["tg_file_id"]
+    if not file_id and message.media is not None:
+        try:
+            file_id = pack_bot_file_id(message.media)
+        except Exception:
+            return False
+    if not file_id:
+        return False
+
+    raw_name = parsed["name"]
+    folder_id: Optional[int] = None
+    if "/" in raw_name:
+        *folder_parts, raw_name = raw_name.split("/")
+        folder_id = await _ensure_sync_folder_path(folder_parts)
+
+    await insert_file(
+        name=raw_name,
+        size=parsed["size"],
+        mime_type=parsed["mime_type"],
+        tg_file_id=file_id,
+        tg_thumb_file_id=parsed["tg_thumb_file_id"],
+        tg_message_id=message.id,
+        uploaded_at=parsed["uploaded_at"],
+        encrypted=parsed["encrypted"],
+        folder_id=folder_id,
+        uid=uid,
+    )
+    if uid:
+        known_uids.add(uid)
+    known_msg_ids.add(message.id)
+    return True
+
+
+async def _run_sync(client, chat_entity) -> dict:
+    """Scan the channel history and import any missing files."""
+    import logging
+    log = logging.getLogger("telecloud.sync")
+
+    known_uids = await list_all_uids()
+    known_msg_ids = await list_all_message_ids()
+
+    eid = getattr(chat_entity, "id", "?")
+    ename = getattr(chat_entity, "title", None) or getattr(chat_entity, "first_name", "?")
+    log.warning("sync: entity id=%s name=%r type=%s", eid, ename, type(chat_entity).__name__)
+
+    imported = 0
+    skipped_exists = 0
+    skipped_no_caption = 0
+    total_seen = 0
+
+    async for message in client.iter_messages(chat_entity):
+        total_seen += 1
+
+        # Quick pre-filter by message_id (avoids parsing for already-known messages)
+        if message.id in known_msg_ids:
+            skipped_exists += 1
+            continue
+
+        caption = message.message or ""
+        parsed = parse_caption(caption)
+        if parsed is None:
+            skipped_no_caption += 1
+            continue
+
+        uid = parsed["uid"]
+        if uid and uid in known_uids:
+            skipped_exists += 1
+            continue
+
+        did_import = await _import_message(message, known_uids, known_msg_ids)
+        if did_import:
+            imported += 1
+        else:
+            skipped_no_caption += 1
+
+    log.warning(
+        "sync: done — total_seen=%s imported=%s skipped_exists=%s skipped_no_caption=%s",
+        total_seen, imported, skipped_exists, skipped_no_caption,
+    )
+    return {
+        "ok": True,
+        "imported": imported,
+        "skipped_exists": skipped_exists,
+        "skipped_no_caption": skipped_no_caption,
     }
 
 
@@ -164,7 +314,7 @@ async def _resolve_chat(client, chat_id_raw: str, bot_token: Optional[str] = Non
     )
 
 
-async def sync_from_telegram() -> dict:
+def _build_telethon_client():
     try:
         from telethon import TelegramClient as TelethonClient
         from telethon.sessions import StringSession
@@ -173,94 +323,96 @@ async def sync_from_telegram() -> dict:
 
     api_id_raw = os.getenv("TG_API_ID", "").strip()
     api_hash = os.getenv("TG_API_HASH", "").strip()
-    chat_id_raw = os.getenv("CHAT_ID", "").strip()
     session_str = os.getenv("TG_SESSION_STRING", "").strip()
 
     if not api_id_raw or not api_hash:
         raise ValueError("TG_API_ID 和 TG_API_HASH 尚未設定，請先在設定頁面填入。")
-    if not chat_id_raw:
-        raise ValueError("CHAT_ID 尚未設定。")
     if not session_str:
         raise ValueError(
             "尚未完成使用者帳號認證。請在終端機執行：\n\n  telecloud sync-auth\n\n"
             "完成手機 OTP 驗證後再同步。"
         )
+    return TelethonClient(StringSession(session_str), int(api_id_raw), api_hash)
 
-    api_id = int(api_id_raw)
-    client = TelethonClient(StringSession(session_str), api_id, api_hash)
-    # connect as user (no bot_token) — user accounts can read message history
+
+async def sync_from_telegram() -> dict:
+    chat_id_raw = os.getenv("CHAT_ID", "").strip()
+    if not chat_id_raw:
+        raise ValueError("CHAT_ID 尚未設定。")
+
+    client = _build_telethon_client()
     await client.connect()
     if not await client.is_user_authorized():
-        raise ValueError(
-            "Session 已失效，請重新執行 `telecloud sync-auth` 重新認證。"
-        )
+        await client.disconnect()
+        raise ValueError("Session 已失效，請重新執行 `telecloud sync-auth` 重新認證。")
 
     try:
-        import logging
-        log = logging.getLogger("telecloud.sync")
-
-        existing_msg_ids = await list_all_message_ids()
         bot_token = os.getenv("BOT_TOKEN", "").strip()
         chat_entity = await _resolve_chat(client, chat_id_raw, bot_token=bot_token)
-
-        eid = getattr(chat_entity, "id", "?")
-        ename = getattr(chat_entity, "title", None) or getattr(chat_entity, "first_name", "?")
-        log.warning("sync: resolved entity id=%s name=%r type=%s", eid, ename, type(chat_entity).__name__)
-
-        imported = 0
-        skipped_exists = 0
-        skipped_no_caption = 0
-        total_seen = 0
-
-        from telethon.utils import pack_bot_file_id
-
-        async for message in client.iter_messages(chat_entity):
-            total_seen += 1
-            if total_seen == 1:
-                log.warning("sync: first message id=%s media=%s", message.id, type(message.media).__name__ if message.media else "none")
-            if message.id in existing_msg_ids:
-                skipped_exists += 1
-                continue
-
-            caption = message.message or ""
-            parsed = parse_caption(caption)
-
-            if parsed is None:
-                skipped_no_caption += 1
-                continue
-
-            # Derive Bot-API-compatible file_id from the message media if not in caption
-            file_id = parsed["tg_file_id"]
-            if not file_id and message.media is not None:
-                try:
-                    file_id = pack_bot_file_id(message.media)
-                except Exception:
-                    skipped_no_caption += 1
-                    continue
-
-            if not file_id:
-                skipped_no_caption += 1
-                continue
-
-            await insert_file(
-                name=parsed["name"],
-                size=parsed["size"],
-                mime_type=parsed["mime_type"],
-                tg_file_id=file_id,
-                tg_thumb_file_id=parsed["tg_thumb_file_id"],
-                tg_message_id=message.id,
-                uploaded_at=parsed["uploaded_at"],
-                encrypted=parsed["encrypted"],
-            )
-            imported += 1
-
-        log.warning("sync: done — total_seen=%s imported=%s skipped_exists=%s skipped_no_caption=%s",
-                    total_seen, imported, skipped_exists, skipped_no_caption)
-        return {
-            "ok": True,
-            "imported": imported,
-            "skipped_exists": skipped_exists,
-            "skipped_no_caption": skipped_no_caption,
-        }
+        return await _run_sync(client, chat_entity)
     finally:
         await client.disconnect()
+
+
+async def start_sync_listener() -> None:
+    """Connect a persistent Telethon user client.
+
+    On startup runs a full history scan to catch any messages uploaded while
+    the server was offline, then registers a NewMessage event handler so
+    subsequent uploads are imported in real-time without polling.
+
+    Runs until the asyncio task is cancelled (e.g. on server shutdown).
+    """
+    import logging
+    log = logging.getLogger("telecloud.sync")
+
+    chat_id_raw = os.getenv("CHAT_ID", "").strip()
+    bot_token = os.getenv("BOT_TOKEN", "").strip()
+    if not chat_id_raw:
+        log.warning("sync listener: CHAT_ID not set, skipping")
+        return
+
+    try:
+        from telethon import events
+        client = _build_telethon_client()
+    except (RuntimeError, ValueError) as exc:
+        log.warning("sync listener: cannot start — %s", exc)
+        return
+
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            log.warning("sync listener: session expired, please re-run telecloud sync-auth")
+            return
+
+        chat_entity = await _resolve_chat(client, chat_id_raw, bot_token=bot_token)
+
+        # Initial history scan to catch messages uploaded while offline
+        result = await _run_sync(client, chat_entity)
+        if result["imported"] > 0:
+            log.warning("sync listener startup: imported %s file(s)", result["imported"])
+
+        # Real-time event handler for new messages
+        @client.on(events.NewMessage(chats=chat_entity))
+        async def _on_new_message(event):
+            try:
+                imported = await _import_message(event.message)
+                if imported:
+                    log.warning(
+                        "sync event: imported message_id=%s", event.message.id
+                    )
+            except Exception as exc:
+                log.warning("sync event handler error: %s", exc)
+
+        log.warning("sync listener: watching for new messages in real-time")
+        await client.run_until_disconnected()
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning("sync listener crashed: %s", exc)
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
