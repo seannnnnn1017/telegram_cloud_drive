@@ -572,8 +572,9 @@ async function loadStorage() {
     else if (used < 1024 ** 3) label = `${(used / 1024 ** 2).toFixed(2)}<small> MB</small>`;
     else label = `${(used / 1024 ** 3).toFixed(2)}<small> GB</small>`;
     document.getElementById('storage-num').innerHTML = label;
-    const pct = Math.min(data.file_count * 2, 95);
-    document.getElementById('storage-bar').style.width = `${pct}%`;
+    const QUOTA = 2 * 1024 ** 3; // 2 GB visual quota
+    const pct = Math.min((data.used_bytes / QUOTA) * 100, 95);
+    document.getElementById('storage-bar').style.width = `${pct.toFixed(1)}%`;
   } catch {}
 }
 

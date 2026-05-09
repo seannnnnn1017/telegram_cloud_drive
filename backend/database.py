@@ -90,6 +90,8 @@ async def delete_file(file_id: int) -> bool:
 
 
 async def bulk_delete_files(ids: list[int]) -> int:
+    if not ids:
+        return 0
     placeholders = ",".join("?" * len(ids))
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(f"DELETE FROM files WHERE id IN ({placeholders})", ids)

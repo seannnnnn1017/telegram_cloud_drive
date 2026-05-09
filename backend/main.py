@@ -1,4 +1,5 @@
 import os
+import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -98,7 +99,7 @@ async def api_download(file_id: int):
     return Response(
         content=content,
         media_type=record.mime_type or "application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{record.name}"'},
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{urllib.parse.quote(record.name)}"},
     )
 
 
@@ -115,7 +116,7 @@ async def api_preview(file_id: int):
     return Response(
         content=content,
         media_type=mime,
-        headers={"Content-Disposition": f'inline; filename="{record.name}"'},
+        headers={"Content-Disposition": f"inline; filename*=UTF-8''{urllib.parse.quote(record.name)}"},
     )
 
 
