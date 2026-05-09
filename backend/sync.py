@@ -121,24 +121,34 @@ async def _resolve_chat(client, chat_id_raw: str, bot_token: Optional[str] = Non
         except Exception:
             pass
     else:
-        # Positive — try as channel first (channel ID without -100 prefix)
+        # Positive — first check if this is the user's own Telegram ID.
+        # If so, files are stored in the DM between user and bot, so the
+        # correct Telethon entity is the BOT (not the user themselves).
+        try:
+            me = await client.get_me()
+            if me is not None and chat_id == me.id and bot_token:
+                bot_user_id = int(bot_token.split(":")[0])
+                return await client.get_entity(bot_user_id)
+        except Exception:
+            pass
+
+        # Try as channel (channel ID without -100 prefix)
         try:
             return await client.get_entity(PeerChannel(chat_id))
         except Exception:
             pass
-        # Try as direct user entity
+
+        # Try as direct user / group entity
         try:
             return await client.get_entity(chat_id)
         except Exception:
             pass
-        # DM fallback: CHAT_ID == user's own ID means files are in the DM with
-        # the bot. From Telethon's perspective the entity is the BOT's user ID,
-        # which is the numeric prefix of BOT_TOKEN (e.g. "123456:AAA..." → 123456).
+
+        # Generic DM fallback via bot token
         if bot_token:
             try:
                 bot_user_id = int(bot_token.split(":")[0])
-                entity = await client.get_entity(bot_user_id)
-                return entity
+                return await client.get_entity(bot_user_id)
             except Exception:
                 pass
 
