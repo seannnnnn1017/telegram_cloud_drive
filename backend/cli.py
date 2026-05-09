@@ -330,7 +330,55 @@ async def run_server(args: argparse.Namespace) -> int:
     return 0
 
 
+async def run_sync_auth(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="telecloud sync-auth",
+        description="Authenticate a Telegram user account so the sync feature can read channel history.",
+    )
+    parser.add_argument("--env-file", default=".env", help="Path to .env file. Defaults to .env.")
+    args = parser.parse_args(argv)
+
+    env_path = Path(args.env_file).expanduser()
+    if env_path.exists():
+        load_dotenv(env_path, override=True)
+    else:
+        load_dotenv()
+
+    api_id_raw = os.getenv("TG_API_ID", "").strip()
+    api_hash = os.getenv("TG_API_HASH", "").strip()
+
+    if not api_id_raw or not api_hash:
+        print("Error: TG_API_ID and TG_API_HASH must be set in .env first.", flush=True)
+        print("Add them via the web UI settings → 跨裝置同步, then re-run this command.", flush=True)
+        return 1
+
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+    except ImportError:
+        print("Error: telethon is not installed. Run: pip install -e .", flush=True)
+        return 1
+
+    print("telecloud sync-auth: starting user account authentication...", flush=True)
+    print("You will be prompted for your phone number and a Telegram OTP.", flush=True)
+
+    client = TelegramClient(StringSession(), int(api_id_raw), api_hash)
+    await client.start()  # interactive: prompts phone + OTP in terminal
+    session_str = client.session.save()
+    await client.disconnect()
+
+    update_env_file(env_path, {"TG_SESSION_STRING": session_str})
+    os.environ["TG_SESSION_STRING"] = session_str
+    print(f"telecloud sync-auth: session saved to {env_path}", flush=True)
+    print("Authentication complete. You can now use the sync button in the web UI.", flush=True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "sync-auth":
+        return asyncio.run(run_sync_auth(argv[1:]))
     args = parse_args(argv)
     if args.server:
         return spawn_servers(args)

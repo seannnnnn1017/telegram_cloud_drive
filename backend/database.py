@@ -238,6 +238,12 @@ async def delete_folders(ids: list[int]) -> int:
         return cur.rowcount
 
 
+async def list_all_message_ids() -> set[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT tg_message_id FROM files") as cur:
+            return {row[0] for row in await cur.fetchall()}
+
+
 async def get_storage_stats() -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT COALESCE(SUM(size),0), COUNT(*) FROM files") as cur:

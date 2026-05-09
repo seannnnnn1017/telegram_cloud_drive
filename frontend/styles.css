@@ -289,3 +289,5 @@
     .settings-bg{padding:0}
     .settings{max-height:100vh;height:100vh;border-radius:0;border:0}
   }
+
+@keyframes spin { to { transform: rotate(360deg); } }

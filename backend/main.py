@@ -51,9 +51,13 @@ from .models import (
     ShareSettingsRequest,
     ShareSettingsResponse,
     StorageStats,
+    SyncResponse,
+    SyncSettingsRequest,
+    SyncSettingsResponse,
     TelegramSettingsRequest,
     TelegramSettingsResponse,
 )
+from .sync import make_caption, sync_from_telegram
 from .telegram import TelegramClient
 
 load_dotenv()
@@ -490,17 +494,32 @@ async def api_upload(
         file.filename, content, file.content_type or "application/octet-stream"
     )
     now = datetime.now(timezone.utc).isoformat()
+    thumb_file_id = None if encrypted else tg_result.get("thumb_file_id")
     new_id = await insert_file(
         name=file.filename,
         size=len(content),
         mime_type=stored_mime_type,
         tg_file_id=tg_result["file_id"],
-        tg_thumb_file_id=None if encrypted else tg_result.get("thumb_file_id"),
+        tg_thumb_file_id=thumb_file_id,
         tg_message_id=tg_result["message_id"],
         uploaded_at=now,
         folder_id=folder_id,
         encrypted=encrypted,
     )
+    # Write metadata caption so other devices can sync via Telegram history
+    try:
+        caption = make_caption(
+            name=file.filename,
+            size=len(content),
+            mime_type=stored_mime_type,
+            tg_file_id=tg_result["file_id"],
+            tg_thumb_file_id=thumb_file_id,
+            encrypted=encrypted,
+            uploaded_at=now,
+        )
+        await tg.edit_message_caption(tg_result["message_id"], caption)
+    except Exception:
+        pass  # Caption is best-effort; don't fail the upload
     record = await get_file(new_id)
     return file_response(record)
 
@@ -664,6 +683,47 @@ async def api_download_share(token: str):
 async def api_storage():
     stats = await get_storage_stats()
     return StorageStats(**stats)
+
+
+@app.get("/api/settings/sync", response_model=SyncSettingsResponse)
+async def api_get_sync_settings():
+    api_id = os.getenv("TG_API_ID", "").strip()
+    return SyncSettingsResponse(
+        api_id=api_id,
+        api_id_set=bool(api_id),
+        has_session=bool(os.getenv("TG_SESSION_STRING", "").strip()),
+    )
+
+
+@app.put("/api/settings/sync", response_model=SyncSettingsResponse)
+async def api_update_sync_settings(body: SyncSettingsRequest):
+    api_id = body.api_id.strip()
+    api_hash = body.api_hash.strip()
+    if not api_id or not api_hash:
+        raise HTTPException(status_code=400, detail="API ID 和 API Hash 均為必填")
+    try:
+        int(api_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="API ID 必須為數字")
+    update_env_file(env_path(), {"TG_API_ID": api_id, "TG_API_HASH": api_hash})
+    os.environ["TG_API_ID"] = api_id
+    os.environ["TG_API_HASH"] = api_hash
+    return SyncSettingsResponse(
+        api_id=api_id,
+        api_id_set=True,
+        has_session=bool(os.getenv("TG_SESSION_STRING", "").strip()),
+    )
+
+
+@app.post("/api/sync", response_model=SyncResponse)
+async def api_sync():
+    try:
+        result = await sync_from_telegram()
+        return SyncResponse(**result)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"同步失敗：{exc}") from exc
 
 
 app.mount("/", StaticFiles(directory=PROJECT_ROOT / "frontend", html=True), name="static")

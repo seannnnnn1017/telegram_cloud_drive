@@ -102,3 +102,21 @@ class ShareCreateResponse(BaseModel):
     token: str
     url: str
     expires_at: Optional[datetime] = None
+
+
+class SyncSettingsRequest(BaseModel):
+    api_id: str
+    api_hash: str
+
+
+class SyncSettingsResponse(BaseModel):
+    api_id: str = ""
+    api_id_set: bool = False
+    has_session: bool = False
+
+
+class SyncResponse(BaseModel):
+    ok: bool
+    imported: int
+    skipped_exists: int
+    skipped_no_caption: int

@@ -131,3 +131,13 @@ class TelegramClient:
             timeout=10.0,
         )
         return r.json().get("ok", False)
+
+    async def edit_message_caption(self, message_id: int, caption: str) -> None:
+        r = await self._client.post(
+            f"{self._api}/editMessageCaption",
+            json={"chat_id": self._chat_id, "message_id": message_id, "caption": caption},
+            timeout=10.0,
+        )
+        data = r.json()
+        if not data.get("ok"):
+            raise ValueError(f"Telegram editMessageCaption error: {data.get('description', 'unknown error')}")

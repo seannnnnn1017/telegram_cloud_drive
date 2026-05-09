@@ -1454,6 +1454,19 @@ async function loadTelegramSettings() {
   } catch {}
 }
 
+async function loadSyncSettings() {
+  try {
+    const r = await fetch('/api/settings/sync');
+    if (!r.ok) return;
+    const data = await r.json();
+    document.getElementById('set-tg-api-id').value = data.api_id || '';
+    const hint = document.getElementById('sync-session-hint');
+    if (data.has_session) hint.textContent = '✓ Session 已儲存，同步時可直接使用。';
+    else if (data.api_id_set) hint.textContent = '尚未建立 Session，首次同步時會自動產生並儲存。';
+    else hint.textContent = '';
+  } catch {}
+}
+
 async function loadShareSettings() {
   try {
     const r = await fetch('/api/settings/share');
@@ -1473,7 +1486,7 @@ async function loadServerSettings() {
 }
 
 async function openSettings() {
-  await Promise.all([loadTelegramSettings(), loadShareSettings(), loadServerSettings()]);
+  await Promise.all([loadTelegramSettings(), loadShareSettings(), loadServerSettings(), loadSyncSettings()]);
   applySettings(state.settings);
   document.getElementById('settings-bg').classList.add('show');
 }
@@ -1575,6 +1588,20 @@ document.getElementById('set-save').onclick = async () => {
     catch { toast('伺服器設定儲存失敗', true); }
     return;
   }
+  const syncApiId = document.getElementById('set-tg-api-id').value.trim();
+  const syncApiHash = document.getElementById('set-tg-api-hash').value.trim();
+  if (syncApiId && syncApiHash) {
+    const syncRes = await fetch('/api/settings/sync', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_id: syncApiId, api_hash: syncApiHash }),
+    });
+    if (!syncRes.ok) {
+      try { toast((await syncRes.json()).detail || '同步設定儲存失敗', true); }
+      catch { toast('同步設定儲存失敗', true); }
+      return;
+    }
+  }
   state.settings = s;
   saveSettings(s);
   applyTheme(s.theme);
@@ -1607,6 +1634,34 @@ document.getElementById('set-clear-key').onclick = async () => {
 };
 
 applyTheme(state.settings.theme);
+
+// ===== Telegram Sync =====
+document.getElementById('sync-btn').onclick = async () => {
+  const btn = document.getElementById('sync-btn');
+  const svg = btn.querySelector('svg');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  svg.style.animation = 'spin 1s linear infinite';
+  document.getElementById('sync-status').textContent = '同步中…';
+  try {
+    const r = await fetch('/api/sync', { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) {
+      toast(data.detail || '同步失敗', true);
+      document.getElementById('sync-status').textContent = '同步失敗';
+      return;
+    }
+    toast(`同步完成：匯入 ${data.imported} 個，已存在 ${data.skipped_exists} 個，無 caption ${data.skipped_no_caption} 個`);
+    document.getElementById('sync-status').textContent = `同步完成 · 匯入 ${data.imported} 個`;
+    if (data.imported > 0) { loadFiles(); loadStorage(); }
+  } catch {
+    toast('同步失敗：網路錯誤', true);
+    document.getElementById('sync-status').textContent = '同步失敗';
+  } finally {
+    btn.disabled = false;
+    svg.style.animation = '';
+  }
+};
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {

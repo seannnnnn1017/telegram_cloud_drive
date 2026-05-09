@@ -1,0 +1,2 @@
+[console_scripts]
+telecloud = backend.cli:main
