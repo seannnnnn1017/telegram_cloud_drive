@@ -490,10 +490,19 @@ async def api_upload(
         )
     tg = get_tg_client()
     stored_mime_type = original_mime_type if encrypted and original_mime_type else (file.content_type or "application/octet-stream")
-    tg_result = await tg.send_document(
-        file.filename, content, file.content_type or "application/octet-stream"
-    )
     now = datetime.now(timezone.utc).isoformat()
+    # Embed metadata as caption so any device can sync from Telegram history
+    caption = make_caption(
+        name=file.filename,
+        size=len(content),
+        mime_type=stored_mime_type,
+        encrypted=encrypted,
+        uploaded_at=now,
+    )
+    tg_result = await tg.send_document(
+        file.filename, content, file.content_type or "application/octet-stream",
+        caption=caption,
+    )
     thumb_file_id = None if encrypted else tg_result.get("thumb_file_id")
     new_id = await insert_file(
         name=file.filename,
@@ -506,26 +515,6 @@ async def api_upload(
         folder_id=folder_id,
         encrypted=encrypted,
     )
-    # Write metadata caption so other devices can sync via Telegram history
-    try:
-        caption = make_caption(
-            name=file.filename,
-            size=len(content),
-            mime_type=stored_mime_type,
-            tg_file_id=tg_result["file_id"],
-            tg_thumb_file_id=thumb_file_id,
-            encrypted=encrypted,
-            uploaded_at=now,
-        )
-        await tg.edit_message_caption(tg_result["message_id"], caption)
-    except Exception as caption_err:
-        import logging
-        logging.getLogger("telecloud").warning(
-            "editMessageCaption failed for message %s: %s — "
-            "Bot may need 'can_edit_messages' admin permission in the channel. "
-            "Run 'telecloud backfill-captions' after granting the permission.",
-            tg_result["message_id"], caption_err,
-        )
     record = await get_file(new_id)
     return file_response(record)
 

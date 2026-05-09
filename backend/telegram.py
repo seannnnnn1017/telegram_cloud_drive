@@ -23,10 +23,15 @@ class TelegramClient:
         if self._owns_client:
             await self._client.aclose()
 
-    async def send_document(self, filename: str, content: bytes, mime_type: str) -> dict:
+    async def send_document(
+        self, filename: str, content: bytes, mime_type: str, caption: Optional[str] = None
+    ) -> dict:
+        form_data: dict = {"chat_id": self._chat_id}
+        if caption:
+            form_data["caption"] = caption
         r, data = await self._post_with_retry(
             f"{self._api}/sendDocument",
-            data={"chat_id": self._chat_id},
+            data=form_data,
             files={"document": (filename, content, mime_type)},
             timeout=60.0,
         )

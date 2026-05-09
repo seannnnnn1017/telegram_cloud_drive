@@ -381,10 +381,10 @@ async def run_backfill_captions(argv: list[str]) -> int:
                 name=record["name"],
                 size=record["size"],
                 mime_type=record["mime_type"],
-                tg_file_id=record["tg_file_id"],
-                tg_thumb_file_id=record.get("tg_thumb_file_id"),
                 encrypted=bool(record.get("encrypted", 0)),
                 uploaded_at=str(record["uploaded_at"]),
+                tg_file_id=record["tg_file_id"],
+                tg_thumb_file_id=record.get("tg_thumb_file_id"),
             )
             await tg.edit_message_caption(record["tg_message_id"], caption)
             ok += 1

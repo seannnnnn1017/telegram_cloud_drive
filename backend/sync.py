@@ -12,10 +12,10 @@ def make_caption(
     name: str,
     size: int,
     mime_type: Optional[str],
-    tg_file_id: str,
-    tg_thumb_file_id: Optional[str],
     encrypted: bool,
     uploaded_at: str,
+    tg_file_id: Optional[str] = None,
+    tg_thumb_file_id: Optional[str] = None,
 ) -> str:
     data: dict = {
         "v": CAPTION_VERSION,
@@ -24,8 +24,9 @@ def make_caption(
         "m": mime_type or "",
         "e": int(encrypted),
         "t": uploaded_at,
-        "f": tg_file_id,
     }
+    if tg_file_id:
+        data["f"] = tg_file_id
     if tg_thumb_file_id:
         data["th"] = tg_thumb_file_id
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
@@ -40,13 +41,14 @@ def parse_caption(text: str) -> Optional[dict]:
         return None
     if data.get("v") != CAPTION_VERSION:
         return None
-    if not all(k in data for k in ("n", "s", "f", "t")):
+    # "f" (file_id) is optional — synced via pack_bot_file_id if absent
+    if not all(k in data for k in ("n", "s", "t")):
         return None
     return {
         "name": data["n"],
         "size": int(data["s"]),
         "mime_type": data.get("m") or None,
-        "tg_file_id": data["f"],
+        "tg_file_id": data.get("f") or "",
         "tg_thumb_file_id": data.get("th"),
         "encrypted": bool(data.get("e", 0)),
         "uploaded_at": data["t"],
@@ -126,6 +128,8 @@ async def sync_from_telegram() -> dict:
         skipped_exists = 0
         skipped_no_caption = 0
 
+        from telethon.utils import pack_bot_file_id
+
         async for message in client.iter_messages(chat_id):
             if message.id in existing_msg_ids:
                 skipped_exists += 1
@@ -138,11 +142,24 @@ async def sync_from_telegram() -> dict:
                 skipped_no_caption += 1
                 continue
 
+            # Derive Bot-API-compatible file_id from the message media if not in caption
+            file_id = parsed["tg_file_id"]
+            if not file_id and message.media is not None:
+                try:
+                    file_id = pack_bot_file_id(message.media)
+                except Exception:
+                    skipped_no_caption += 1
+                    continue
+
+            if not file_id:
+                skipped_no_caption += 1
+                continue
+
             await insert_file(
                 name=parsed["name"],
                 size=parsed["size"],
                 mime_type=parsed["mime_type"],
-                tg_file_id=parsed["tg_file_id"],
+                tg_file_id=file_id,
                 tg_thumb_file_id=parsed["tg_thumb_file_id"],
                 tg_message_id=message.id,
                 uploaded_at=parsed["uploaded_at"],
