@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import os
 import secrets
 import time
@@ -14,7 +15,7 @@ from typing import Optional
 from starlette.requests import Request
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .database import (
@@ -64,6 +65,18 @@ from .telegram import TelegramClient
 load_dotenv()
 
 MAX_BYTES = 20 * 1024 * 1024  # 20 MB
+_sse_clients: list[asyncio.Queue] = []
+
+
+async def _sse_broadcast(data: dict) -> None:
+    if not _sse_clients:
+        return
+    msg = f"event: sync\ndata: {json.dumps(data)}\n\n"
+    for q in list(_sse_clients):
+        try:
+            q.put_nowait(msg)
+        except asyncio.QueueFull:
+            pass
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 folder_ensure_lock = asyncio.Lock()
 
@@ -271,7 +284,9 @@ async def lifespan(app: FastAPI):
     if os.getenv("TELEGRAM_INGEST_UPDATES", "true").lower() in {"1", "true", "yes", "on"}:
         app.state.tg_poll_task = asyncio.create_task(poll_telegram_uploads(app.state.tg_client))
     if os.getenv("TG_SESSION_STRING", "").strip():
-        app.state.tg_sync_task = asyncio.create_task(start_sync_listener())
+        app.state.tg_sync_task = asyncio.create_task(
+            start_sync_listener(on_change=_sse_broadcast)
+        )
     try:
         yield
     finally:
@@ -728,10 +743,40 @@ async def api_update_sync_settings(body: SyncSettingsRequest):
     )
 
 
+@app.get("/api/events")
+async def api_events(request: Request):
+    """Server-Sent Events stream. Pushes a 'sync' event when the local DB changes."""
+    q: asyncio.Queue = asyncio.Queue(maxsize=20)
+    _sse_clients.append(q)
+
+    async def generate():
+        try:
+            yield ": connected\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=20)
+                    yield msg
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            if q in _sse_clients:
+                _sse_clients.remove(q)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/api/sync", response_model=SyncResponse)
 async def api_sync():
     try:
         result = await sync_from_telegram()
+        if result.get("imported", 0) > 0 or result.get("deleted", 0) > 0:
+            asyncio.create_task(_sse_broadcast(result))
         return SyncResponse(**result)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -13,6 +13,7 @@ import backend.database as db_module
 db_module.DB_PATH = Path(tempfile.gettempdir()) / "test_vault_sync.db"
 
 from backend.database import (
+    delete_files_by_message_ids,
     get_file,
     init_db,
     insert_file,
@@ -375,3 +376,85 @@ async def test_two_server_mixed_old_and_new_captions():
     files = await list_files()
     names = {f.name for f in files}
     assert names == {"legacy.txt", "modern.jpg"}
+
+
+# ---------------------------------------------------------------------------
+# Deletion sync
+# ---------------------------------------------------------------------------
+
+async def test_delete_files_by_message_ids():
+    await insert_file("a.jpg", 100, "image/jpeg", "f1", 1, "2026-01-01T00:00:00+00:00")
+    await insert_file("b.jpg", 100, "image/jpeg", "f2", 2, "2026-01-01T00:00:00+00:00")
+    await insert_file("c.jpg", 100, "image/jpeg", "f3", 3, "2026-01-01T00:00:00+00:00")
+    deleted = await delete_files_by_message_ids({1, 3})
+    assert deleted == 2
+    files = await list_files()
+    assert len(files) == 1
+    assert files[0].name == "b.jpg"
+
+
+async def test_delete_files_by_message_ids_empty_set():
+    await insert_file("a.jpg", 100, "image/jpeg", "f1", 1, "2026-01-01T00:00:00+00:00")
+    deleted = await delete_files_by_message_ids(set())
+    assert deleted == 0
+    assert len(await list_files()) == 1
+
+
+async def test_run_sync_deletes_orphaned_records():
+    """Files in the DB whose Telegram messages no longer exist are removed."""
+    # Insert 3 files — message IDs 1, 2, 3
+    await insert_file("keep.jpg",   100, "image/jpeg", "f1", 1, "2026-01-01T00:00:00+00:00", uid="uid-1")
+    await insert_file("keep2.jpg",  100, "image/jpeg", "f2", 2, "2026-01-01T00:00:00+00:00", uid="uid-2")
+    await insert_file("delete.jpg", 100, "image/jpeg", "f3", 3, "2026-01-01T00:00:00+00:00", uid="uid-3")
+
+    # Telegram now only has messages 1 and 2 (message 3 was deleted)
+    tg_messages = [
+        FakeMessage(id=1, caption=_make_tg_caption("keep.jpg",  uid="uid-1", file_id="f1")),
+        FakeMessage(id=2, caption=_make_tg_caption("keep2.jpg", uid="uid-2", file_id="f2")),
+    ]
+    mock_client = AsyncMock()
+    mock_client.iter_messages = lambda entity: _fake_iter(tg_messages)
+
+    result = await _run_sync(mock_client, object())
+
+    assert result["deleted"] == 1
+    assert result["imported"] == 0
+    files = await list_files()
+    assert len(files) == 2
+    names = {f.name for f in files}
+    assert "delete.jpg" not in names
+
+
+async def test_run_sync_deleted_field_zero_when_nothing_removed():
+    cap = _make_tg_caption("photo.jpg", uid="uid-x", file_id="TG_X")
+    tg_messages = [FakeMessage(id=5, caption=cap)]
+    mock_client = AsyncMock()
+    mock_client.iter_messages = lambda entity: _fake_iter(tg_messages)
+
+    result = await _run_sync(mock_client, object())
+    assert result["deleted"] == 0
+
+
+async def test_two_server_deletion_sync():
+    """
+    Server A deletes a file (removes the Telegram message).
+    Server B syncs — the record that had that message_id should be removed.
+    """
+    # Server B already has 2 files synced from a previous run
+    await insert_file("alive.jpg",   500, "image/jpeg", "fA", 10, "2026-01-01T00:00:00+00:00", uid="uid-alive")
+    await insert_file("deleted.jpg", 500, "image/jpeg", "fB", 11, "2026-01-01T00:00:00+00:00", uid="uid-deleted")
+
+    # Server A deleted message 11 — Telegram now only returns message 10
+    tg_messages = [
+        FakeMessage(id=10, caption=_make_tg_caption("alive.jpg", uid="uid-alive", file_id="fA")),
+    ]
+    mock_client = AsyncMock()
+    mock_client.iter_messages = lambda entity: _fake_iter(tg_messages)
+
+    result = await _run_sync(mock_client, object())
+
+    assert result["deleted"] == 1
+    assert result["imported"] == 0
+    files = await list_files()
+    assert len(files) == 1
+    assert files[0].name == "alive.jpg"

@@ -121,3 +121,4 @@ class SyncResponse(BaseModel):
     imported: int
     skipped_exists: int
     skipped_no_caption: int
+    deleted: int = 0

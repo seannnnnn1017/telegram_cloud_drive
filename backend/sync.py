@@ -7,6 +7,7 @@ from typing import Optional
 
 from .database import (
     create_folder,
+    delete_files_by_message_ids,
     get_folder,
     get_folder_by_name,
     insert_file,
@@ -152,12 +153,14 @@ async def _import_message(
 
 
 async def _run_sync(client, chat_entity) -> dict:
-    """Scan the channel history and import any missing files."""
+    """Scan the channel history, import missing files, and remove deleted ones."""
     import logging
     log = logging.getLogger("telecloud.sync")
 
+    # Snapshot of DB state before the scan — used to detect orphaned records
+    db_msg_ids = await list_all_message_ids()
     known_uids = await list_all_uids()
-    known_msg_ids = await list_all_message_ids()
+    known_msg_ids = set(db_msg_ids)  # mutable copy for import dedup
 
     eid = getattr(chat_entity, "id", "?")
     ename = getattr(chat_entity, "title", None) or getattr(chat_entity, "first_name", "?")
@@ -167,11 +170,13 @@ async def _run_sync(client, chat_entity) -> dict:
     skipped_exists = 0
     skipped_no_caption = 0
     total_seen = 0
+    telegram_msg_ids: set[int] = set()
 
     async for message in client.iter_messages(chat_entity):
         total_seen += 1
+        telegram_msg_ids.add(message.id)
 
-        # Quick pre-filter by message_id (avoids parsing for already-known messages)
+        # Quick pre-filter by message_id
         if message.id in known_msg_ids:
             skipped_exists += 1
             continue
@@ -193,13 +198,20 @@ async def _run_sync(client, chat_entity) -> dict:
         else:
             skipped_no_caption += 1
 
+    # Remove local records whose Telegram messages no longer exist
+    orphaned = db_msg_ids - telegram_msg_ids
+    deleted = await delete_files_by_message_ids(orphaned)
+    if deleted:
+        log.warning("sync: removed %s orphaned record(s)", deleted)
+
     log.warning(
-        "sync: done — total_seen=%s imported=%s skipped_exists=%s skipped_no_caption=%s",
-        total_seen, imported, skipped_exists, skipped_no_caption,
+        "sync: done — total_seen=%s imported=%s deleted=%s skipped_exists=%s skipped_no_caption=%s",
+        total_seen, imported, deleted, skipped_exists, skipped_no_caption,
     )
     return {
         "ok": True,
         "imported": imported,
+        "deleted": deleted,
         "skipped_exists": skipped_exists,
         "skipped_no_caption": skipped_no_caption,
     }
@@ -354,12 +366,16 @@ async def sync_from_telegram() -> dict:
         await client.disconnect()
 
 
-async def start_sync_listener() -> None:
+async def start_sync_listener(on_change=None) -> None:
     """Connect a persistent Telethon user client.
 
-    On startup runs a full history scan to catch any messages uploaded while
-    the server was offline, then registers a NewMessage event handler so
-    subsequent uploads are imported in real-time without polling.
+    On startup runs a full history scan (importing missing files and removing
+    orphaned records), then listens for real-time events:
+    - NewMessage  → import new file
+    - MessageDeleted → remove from local DB
+
+    *on_change* is an optional async callable invoked with a result dict
+    ``{"imported": N, "deleted": M}`` whenever the local DB changes.
 
     Runs until the asyncio task is cancelled (e.g. on server shutdown).
     """
@@ -379,6 +395,13 @@ async def start_sync_listener() -> None:
         log.warning("sync listener: cannot start — %s", exc)
         return
 
+    async def _notify(result: dict) -> None:
+        if on_change and (result.get("imported", 0) > 0 or result.get("deleted", 0) > 0):
+            try:
+                await on_change(result)
+            except Exception as exc:
+                log.warning("sync on_change callback error: %s", exc)
+
     try:
         await client.connect()
         if not await client.is_user_authorized():
@@ -387,24 +410,37 @@ async def start_sync_listener() -> None:
 
         chat_entity = await _resolve_chat(client, chat_id_raw, bot_token=bot_token)
 
-        # Initial history scan to catch messages uploaded while offline
+        # Initial history scan
         result = await _run_sync(client, chat_entity)
-        if result["imported"] > 0:
-            log.warning("sync listener startup: imported %s file(s)", result["imported"])
+        log.warning(
+            "sync listener startup: imported=%s deleted=%s",
+            result["imported"], result["deleted"],
+        )
+        await _notify(result)
 
-        # Real-time event handler for new messages
+        # Real-time: new uploads
         @client.on(events.NewMessage(chats=chat_entity))
         async def _on_new_message(event):
             try:
-                imported = await _import_message(event.message)
-                if imported:
-                    log.warning(
-                        "sync event: imported message_id=%s", event.message.id
-                    )
+                did_import = await _import_message(event.message)
+                if did_import:
+                    log.warning("sync event: imported message_id=%s", event.message.id)
+                    await _notify({"imported": 1, "deleted": 0})
             except Exception as exc:
-                log.warning("sync event handler error: %s", exc)
+                log.warning("sync new-message handler error: %s", exc)
 
-        log.warning("sync listener: watching for new messages in real-time")
+        # Real-time: deletions
+        @client.on(events.MessageDeleted)
+        async def _on_deleted(event):
+            try:
+                deleted = await delete_files_by_message_ids(set(event.deleted_ids))
+                if deleted:
+                    log.warning("sync delete event: removed %s file(s)", deleted)
+                    await _notify({"imported": 0, "deleted": deleted})
+            except Exception as exc:
+                log.warning("sync delete handler error: %s", exc)
+
+        log.warning("sync listener: watching for new messages and deletions in real-time")
         await client.run_until_disconnected()
 
     except asyncio.CancelledError:

@@ -266,6 +266,19 @@ async def list_all_message_ids() -> set[int]:
             return {row[0] for row in await cur.fetchall()}
 
 
+async def delete_files_by_message_ids(msg_ids: set[int]) -> int:
+    if not msg_ids:
+        return 0
+    placeholders = ",".join("?" * len(msg_ids))
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            f"DELETE FROM files WHERE tg_message_id IN ({placeholders})",
+            list(msg_ids),
+        )
+        await db.commit()
+        return cur.rowcount
+
+
 async def list_all_uids() -> set[str]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT uid FROM files WHERE uid IS NOT NULL") as cur:
