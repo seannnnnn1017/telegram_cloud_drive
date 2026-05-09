@@ -85,8 +85,15 @@ def _update_env_file(path: Path, updates: dict) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n")
 
 
-async def _resolve_chat(client, chat_id_raw: str):
-    """Resolve CHAT_ID to a Telethon entity, trying multiple formats."""
+async def _resolve_chat(client, chat_id_raw: str, bot_token: Optional[str] = None):
+    """Resolve CHAT_ID to a Telethon entity, trying multiple formats.
+
+    Handles:
+    - Channel ID (positive or negative with -100 prefix)
+    - Group/supergroup (negative)
+    - DM with bot (CHAT_ID == user's own ID → use bot's user ID from BOT_TOKEN)
+    - @username strings
+    """
     from telethon.tl.types import PeerChannel, PeerChat
 
     # String username like @channelname
@@ -97,13 +104,14 @@ async def _resolve_chat(client, chat_id_raw: str):
 
     if chat_id < 0:
         # Bot API channel format: -100XXXXXXXXXX
-        if str(abs(chat_id)).startswith("100") and len(str(abs(chat_id))) > 12:
-            channel_id = int(str(abs(chat_id))[3:])
+        abs_str = str(abs(chat_id))
+        if abs_str.startswith("100") and len(abs_str) > 12:
+            channel_id = int(abs_str[3:])
             try:
                 return await client.get_entity(PeerChannel(channel_id))
             except Exception:
                 pass
-        # Regular negative group/supergroup
+        # Regular group/supergroup
         try:
             return await client.get_entity(PeerChat(abs(chat_id)))
         except Exception:
@@ -113,20 +121,31 @@ async def _resolve_chat(client, chat_id_raw: str):
         except Exception:
             pass
     else:
-        # Positive — try as channel first (Bot API omits -100 prefix)
+        # Positive — try as channel first (channel ID without -100 prefix)
         try:
             return await client.get_entity(PeerChannel(chat_id))
         except Exception:
             pass
-        # Fall back to user / direct entity lookup
+        # Try as direct user entity
         try:
             return await client.get_entity(chat_id)
         except Exception:
             pass
+        # DM fallback: CHAT_ID == user's own ID means files are in the DM with
+        # the bot. From Telethon's perspective the entity is the BOT's user ID,
+        # which is the numeric prefix of BOT_TOKEN (e.g. "123456:AAA..." → 123456).
+        if bot_token:
+            try:
+                bot_user_id = int(bot_token.split(":")[0])
+                entity = await client.get_entity(bot_user_id)
+                return entity
+            except Exception:
+                pass
 
     raise ValueError(
         f"Could not resolve CHAT_ID={chat_id_raw!r}. "
-        "Make sure the Telegram user account is a member of the channel/group."
+        "If you are using a private channel, make sure the Telegram user account "
+        "is a member. If using DM storage, ensure BOT_TOKEN is set in .env."
     )
 
 
@@ -163,7 +182,8 @@ async def sync_from_telegram() -> dict:
 
     try:
         existing_msg_ids = await list_all_message_ids()
-        chat_entity = await _resolve_chat(client, chat_id_raw)
+        bot_token = os.getenv("BOT_TOKEN", "").strip()
+        chat_entity = await _resolve_chat(client, chat_id_raw, bot_token=bot_token)
 
         imported = 0
         skipped_exists = 0

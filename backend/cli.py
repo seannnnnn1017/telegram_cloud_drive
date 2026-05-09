@@ -374,8 +374,9 @@ async def run_inspect_messages(argv: list[str]) -> int:
         await client.disconnect()
         return 1
 
+    bot_token = os.getenv("BOT_TOKEN", "").strip()
     try:
-        chat_entity = await _resolve_chat(client, chat_id_raw)
+        chat_entity = await _resolve_chat(client, chat_id_raw, bot_token=bot_token)
         print(f"\n=== inspect last {args.limit} messages in chat {chat_id_raw} ({type(chat_entity).__name__}) ===\n", flush=True)
     except Exception as exc:
         print(f"Error resolving chat: {exc}", flush=True)
