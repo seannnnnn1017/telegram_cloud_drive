@@ -330,6 +330,77 @@ async def run_server(args: argparse.Namespace) -> int:
     return 0
 
 
+async def run_backfill_captions(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="telecloud backfill-captions",
+        description="Write sync metadata captions to existing Telegram messages. "
+                    "Requires the bot to have 'can_edit_messages' admin permission in the channel.",
+    )
+    parser.add_argument("--env-file", default=".env", help="Path to .env file. Defaults to .env.")
+    args = parser.parse_args(argv)
+
+    env_path = Path(args.env_file).expanduser()
+    if env_path.exists():
+        load_dotenv(env_path, override=True)
+    else:
+        load_dotenv()
+    os.environ["TELECLOUD_ENV_FILE"] = str(env_path)
+
+    import aiosqlite
+    from backend.database import DB_PATH, list_files
+    from backend.sync import make_caption
+    from backend.telegram import TelegramClient
+
+    bot_token = os.getenv("BOT_TOKEN", "").strip()
+    chat_id = os.getenv("CHAT_ID", "").strip()
+    if not bot_token or not chat_id:
+        print("Error: BOT_TOKEN and CHAT_ID must be set in .env", flush=True)
+        return 1
+
+    tg = TelegramClient(
+        bot_token=bot_token,
+        chat_id=chat_id,
+        api_base_url=os.getenv("TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
+    )
+
+    # Fetch all files across all folders
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM files ORDER BY id ASC") as cur:
+            records = await cur.fetchall()
+
+    total = len(records)
+    ok = 0
+    failed = 0
+    print(f"telecloud backfill-captions: {total} records to process...", flush=True)
+
+    for row in records:
+        record = dict(row)
+        try:
+            caption = make_caption(
+                name=record["name"],
+                size=record["size"],
+                mime_type=record["mime_type"],
+                tg_file_id=record["tg_file_id"],
+                tg_thumb_file_id=record.get("tg_thumb_file_id"),
+                encrypted=bool(record.get("encrypted", 0)),
+                uploaded_at=str(record["uploaded_at"]),
+            )
+            await tg.edit_message_caption(record["tg_message_id"], caption)
+            ok += 1
+            print(f"  ✓ [{ok}/{total}] {record['name']}", flush=True)
+        except Exception as exc:
+            failed += 1
+            print(f"  ✗ [{record['id']}] {record['name']}: {exc}", flush=True)
+        await asyncio.sleep(0.05)  # avoid hitting rate limits
+
+    await tg.aclose()
+    print(f"\ntelecloud backfill-captions: done — {ok} ok, {failed} failed", flush=True)
+    if failed:
+        print("Tip: make sure the bot has 'can_edit_messages' admin permission in the channel.", flush=True)
+    return 0 if failed == 0 else 1
+
+
 async def run_sync_auth(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="telecloud sync-auth",
@@ -379,6 +450,8 @@ def main(argv: list[str] | None = None) -> int:
         argv = sys.argv[1:]
     if argv and argv[0] == "sync-auth":
         return asyncio.run(run_sync_auth(argv[1:]))
+    if argv and argv[0] == "backfill-captions":
+        return asyncio.run(run_backfill_captions(argv[1:]))
     args = parse_args(argv)
     if args.server:
         return spawn_servers(args)

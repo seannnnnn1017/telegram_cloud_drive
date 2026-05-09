@@ -518,8 +518,14 @@ async def api_upload(
             uploaded_at=now,
         )
         await tg.edit_message_caption(tg_result["message_id"], caption)
-    except Exception:
-        pass  # Caption is best-effort; don't fail the upload
+    except Exception as caption_err:
+        import logging
+        logging.getLogger("telecloud").warning(
+            "editMessageCaption failed for message %s: %s — "
+            "Bot may need 'can_edit_messages' admin permission in the channel. "
+            "Run 'telecloud backfill-captions' after granting the permission.",
+            tg_result["message_id"], caption_err,
+        )
     record = await get_file(new_id)
     return file_response(record)
 
