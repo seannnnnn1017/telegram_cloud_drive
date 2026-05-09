@@ -375,9 +375,27 @@ async def run_inspect_messages(argv: list[str]) -> int:
         return 1
 
     bot_token = os.getenv("BOT_TOKEN", "").strip()
+    me = await client.get_me()
+    print(f"\n[debug] logged in as: id={me.id} username=@{me.username} first_name={me.first_name}", flush=True)
+    print(f"[debug] CHAT_ID={chat_id_raw}  BOT_TOKEN prefix={bot_token.split(':')[0] if bot_token else 'N/A'}", flush=True)
+
+    # List all dialogs to help identify where the bot is
+    print("\n[debug] scanning dialogs for bot...", flush=True)
+    bot_user_id = int(bot_token.split(":")[0]) if bot_token else None
+    async for dialog in client.iter_dialogs(limit=50):
+        entity = dialog.entity
+        eid = getattr(entity, "id", None)
+        name = getattr(entity, "title", None) or getattr(entity, "first_name", "") or ""
+        username = getattr(entity, "username", "") or ""
+        is_bot = getattr(entity, "bot", False)
+        if is_bot or (bot_user_id and eid == bot_user_id):
+            print(f"  [BOT FOUND] id={eid} name={name!r} @{username} unread={dialog.unread_count} total_msgs={dialog.message.id if dialog.message else 0}", flush=True)
+
     try:
         chat_entity = await _resolve_chat(client, chat_id_raw, bot_token=bot_token)
-        print(f"\n=== inspect last {args.limit} messages in chat {chat_id_raw} ({type(chat_entity).__name__}) ===\n", flush=True)
+        eid = getattr(chat_entity, "id", "?")
+        ename = getattr(chat_entity, "title", None) or getattr(chat_entity, "first_name", "?")
+        print(f"\n=== inspect last {args.limit} messages → entity id={eid} name={ename!r} type={type(chat_entity).__name__} ===\n", flush=True)
     except Exception as exc:
         print(f"Error resolving chat: {exc}", flush=True)
         await client.disconnect()
