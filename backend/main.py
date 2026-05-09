@@ -66,6 +66,7 @@ load_dotenv()
 
 MAX_BYTES = 20 * 1024 * 1024  # 20 MB
 _sse_clients: list[asyncio.Queue] = []
+_sse_shutdown: Optional[asyncio.Event] = None  # set during lifespan shutdown
 
 
 async def _sse_broadcast(data: dict) -> None:
@@ -277,6 +278,8 @@ async def poll_telegram_uploads(tg: TelegramClient) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _sse_shutdown
+    _sse_shutdown = asyncio.Event()
     await init_db()
     app.state.tg_client = build_tg_client()
     app.state.tg_poll_task = None
@@ -290,6 +293,11 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Signal all SSE connections to close before uvicorn waits on them
+        _sse_shutdown.set()
+        for q in list(_sse_clients):
+            with suppress(Exception):
+                q.put_nowait(None)  # None = shutdown sentinel
         if app.state.tg_poll_task is not None:
             app.state.tg_poll_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -387,7 +395,8 @@ async def api_delete_folder(folder_id: int):
     file_records = await list_files_in_folder_tree(folder_id)
     tg = get_tg_client()
     for record in file_records:
-        await tg.delete_message(record.tg_message_id)
+        with suppress(Exception):  # best-effort; sync will clean up any that fail
+            await tg.delete_message(record.tg_message_id)
     deleted_files = await bulk_delete_files([record.id for record in file_records])
     folder_ids = await list_folder_tree_ids(folder_id)
     deleted_folders = await delete_folders(folder_ids)
@@ -624,7 +633,10 @@ async def api_delete(file_id: int):
     if record is None:
         raise HTTPException(status_code=404, detail="File not found")
     tg = get_tg_client()
-    await tg.delete_message(record.tg_message_id)
+    try:
+        await tg.delete_message(record.tg_message_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     await delete_file(file_id)
     return {"ok": True}
 
@@ -637,7 +649,10 @@ async def api_bulk_delete(body: BulkDeleteRequest):
     for fid in body.ids:
         record = await get_file(fid)
         if record:
-            await tg.delete_message(record.tg_message_id)
+            try:
+                await tg.delete_message(record.tg_message_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
     deleted = await bulk_delete_files(body.ids)
     return {"deleted": deleted}
 
@@ -756,9 +771,13 @@ async def api_events(request: Request):
                 if await request.is_disconnected():
                     break
                 try:
-                    msg = await asyncio.wait_for(q.get(), timeout=20)
+                    msg = await asyncio.wait_for(q.get(), timeout=5)
+                    if msg is None:  # shutdown sentinel
+                        break
                     yield msg
                 except asyncio.TimeoutError:
+                    if _sse_shutdown and _sse_shutdown.is_set():
+                        break
                     yield ": keepalive\n\n"
         finally:
             if q in _sse_clients:
