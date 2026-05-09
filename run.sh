@@ -6,4 +6,15 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+if command -v python3 &>/dev/null; then
+  PY=python3
+elif command -v python &>/dev/null; then
+  PY=python
+elif command -v py &>/dev/null; then
+  PY=py
+else
+  echo "ERROR: Python not found. Make sure Python 3.11+ is on PATH."
+  exit 1
+fi
+
+$PY -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
