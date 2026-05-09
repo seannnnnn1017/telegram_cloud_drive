@@ -129,13 +129,19 @@ class TelegramClient:
         r.raise_for_status()
         return r.content
 
-    async def delete_message(self, message_id: int) -> bool:
+    async def delete_message(self, message_id: int) -> None:
         r = await self._client.post(
             f"{self._api}/deleteMessage",
             json={"chat_id": self._chat_id, "message_id": message_id},
             timeout=10.0,
         )
-        return r.json().get("ok", False)
+        data = r.json()
+        if not data.get("ok"):
+            desc = data.get("description", "unknown error")
+            # Treat "already gone" as success — another device may have deleted it first
+            if "message to delete not found" in desc.lower():
+                return
+            raise ValueError(f"Telegram deleteMessage failed: {desc}")
 
     async def edit_message_caption(self, message_id: int, caption: str) -> None:
         r = await self._client.post(

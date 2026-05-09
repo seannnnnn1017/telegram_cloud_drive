@@ -137,5 +137,23 @@ async def test_delete_message(httpx_mock: HTTPXMock, tg: TelegramClient):
         url="https://api.telegram.org/botTESTTOKEN/deleteMessage",
         json={"ok": True, "result": True},
     )
-    ok = await tg.delete_message(42)
-    assert ok is True
+    await tg.delete_message(42)  # should not raise
+
+
+async def test_delete_message_already_gone(httpx_mock: HTTPXMock, tg: TelegramClient):
+    """If the message was already deleted elsewhere, treat it as success."""
+    httpx_mock.add_response(
+        url="https://api.telegram.org/botTESTTOKEN/deleteMessage",
+        json={"ok": False, "description": "Bad Request: message to delete not found"},
+    )
+    await tg.delete_message(99)  # should not raise
+
+
+async def test_delete_message_permission_error(httpx_mock: HTTPXMock, tg: TelegramClient):
+    """A real failure (e.g. bot lacks permission) must raise ValueError."""
+    httpx_mock.add_response(
+        url="https://api.telegram.org/botTESTTOKEN/deleteMessage",
+        json={"ok": False, "description": "Bad Request: message can't be deleted"},
+    )
+    with pytest.raises(ValueError, match="deleteMessage failed"):
+        await tg.delete_message(77)
