@@ -191,17 +191,28 @@ async def sync_from_telegram() -> dict:
         )
 
     try:
+        import logging
+        log = logging.getLogger("telecloud.sync")
+
         existing_msg_ids = await list_all_message_ids()
         bot_token = os.getenv("BOT_TOKEN", "").strip()
         chat_entity = await _resolve_chat(client, chat_id_raw, bot_token=bot_token)
 
+        eid = getattr(chat_entity, "id", "?")
+        ename = getattr(chat_entity, "title", None) or getattr(chat_entity, "first_name", "?")
+        log.warning("sync: resolved entity id=%s name=%r type=%s", eid, ename, type(chat_entity).__name__)
+
         imported = 0
         skipped_exists = 0
         skipped_no_caption = 0
+        total_seen = 0
 
         from telethon.utils import pack_bot_file_id
 
         async for message in client.iter_messages(chat_entity):
+            total_seen += 1
+            if total_seen == 1:
+                log.warning("sync: first message id=%s media=%s", message.id, type(message.media).__name__ if message.media else "none")
             if message.id in existing_msg_ids:
                 skipped_exists += 1
                 continue
@@ -238,6 +249,8 @@ async def sync_from_telegram() -> dict:
             )
             imported += 1
 
+        log.warning("sync: done — total_seen=%s imported=%s skipped_exists=%s skipped_no_caption=%s",
+                    total_seen, imported, skipped_exists, skipped_no_caption)
         return {
             "ok": True,
             "imported": imported,
