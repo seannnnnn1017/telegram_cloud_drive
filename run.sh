@@ -6,4 +6,4 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
