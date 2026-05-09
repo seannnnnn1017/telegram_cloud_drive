@@ -20,16 +20,45 @@
 ### 3. 安裝與啟動
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 
 # 建立 .env
 cp .env.example .env
 # 填入 BOT_TOKEN 與 CHAT_ID
 
-uvicorn backend.main:app --host 0.0.0.0 --port 8000
+telecloud
 ```
 
-開啟瀏覽器前往 `http://<LAN-IP>:8000`
+如果 `.env` 不存在、是空檔，或缺少 `BOT_TOKEN` / `CHAT_ID`，`telecloud` 會自動進入設定模式：
+
+1. 在 terminal 貼上 BotFather 給你的 `BOT_TOKEN`
+2. 到 Telegram 對你的 bot 傳任意一則訊息
+3. `telecloud` 會監聽 Telegram update、取得 `CHAT_ID`，並寫回 `.env`
+
+`telecloud` 會自動尋找可用 port，預設開啟瀏覽器；閒置 15 分鐘後會自動關閉服務。
+
+常用選項：
+
+```bash
+# 切換為區域網模式，自動使用本機 LAN IP 產生分享連結
+telecloud --lan
+
+# 手動指定 LAN 可存取
+telecloud --host 0.0.0.0 --share-base-url http://192.168.1.100:8000
+
+# 指定偏好的起始 port；若被占用會往後找可用 port
+telecloud --port 8000
+
+# 自訂閒置關閉秒數；0 代表不自動關閉
+telecloud --idle-timeout 600
+# 也可在網頁設定中調整，會寫入 TELECLOUD_IDLE_TIMEOUT
+
+# 重新執行 bot 設定，強制重新抓 CHAT_ID
+telecloud --setup
+
+# 同時啟動多組伺服器 profile，每組使用自己的 .env
+telecloud --server personal=.env --server work=.env.work
+```
 
 ### 4. 區域網路存取
 

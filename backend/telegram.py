@@ -87,6 +87,22 @@ class TelegramClient:
             raise ValueError(f"Telegram error {r.status_code}: {data.get('description', 'unknown error')}")
         return data["result"]
 
+    async def test_connection(self) -> dict:
+        me = await self._client.post(f"{self._api}/getMe", json={}, timeout=10.0)
+        me_data = me.json()
+        if not me_data.get("ok"):
+            raise ValueError(f"Telegram getMe failed: {me_data.get('description', 'unknown error')}")
+
+        chat = await self._client.post(
+            f"{self._api}/getChat",
+            json={"chat_id": self._chat_id},
+            timeout=10.0,
+        )
+        chat_data = chat.json()
+        if not chat_data.get("ok"):
+            raise ValueError(f"Telegram getChat failed: {chat_data.get('description', 'unknown error')}")
+        return {"bot": me_data["result"], "chat": chat_data["result"]}
+
     async def copy_message(self, from_chat_id: int | str, message_id: int) -> int:
         r = await self._client.post(
             f"{self._api}/copyMessage",

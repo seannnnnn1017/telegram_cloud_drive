@@ -1,6 +1,8 @@
 import pytest
 import backend.database as db_module
+import asyncio
 import io
+import os
 from pathlib import Path
 import tempfile
 import zipfile
@@ -110,6 +112,47 @@ async def test_create_folder(client):
     assert listed.json()[0]["name"] == "Photos"
 
 
+async def test_ensure_folder_path_creates_nested_folders(client):
+    async with client as c:
+        r = await c.post("/api/folders/ensure", json={"path": ["Album", "Day 1"], "parent_id": None})
+        root = await c.get("/api/folders")
+        nested = await c.get(f"/api/folders?parent_id={root.json()[0]['id']}")
+
+    assert r.status_code == 201
+    assert r.json()["name"] == "Day 1"
+    assert root.json()[0]["name"] == "Album"
+    assert nested.json()[0]["name"] == "Day 1"
+
+
+async def test_ensure_folder_path_reuses_existing_folders(client):
+    async with client as c:
+        first = await c.post("/api/folders/ensure", json={"path": ["Album", "Day 1"], "parent_id": None})
+        second = await c.post("/api/folders/ensure", json={"path": ["Album", "Day 1"], "parent_id": None})
+        root = await c.get("/api/folders")
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["id"] == second.json()["id"]
+    assert len(root.json()) == 1
+
+
+async def test_ensure_folder_path_handles_parallel_requests(client):
+    async with client as c:
+        responses = await asyncio.gather(*[
+            c.post("/api/folders/ensure", json={"path": ["Album", "Day 1"], "parent_id": None})
+            for _ in range(5)
+        ])
+        root = await c.get("/api/folders")
+        root_id = root.json()[0]["id"]
+        nested = await c.get(f"/api/folders?parent_id={root_id}")
+
+    ids = {response.json()["id"] for response in responses}
+    assert all(response.status_code == 201 for response in responses)
+    assert len(ids) == 1
+    assert len(root.json()) == 1
+    assert len(nested.json()) == 1
+
+
 async def test_delete_folder_recursive(mock_tg, client):
     async with client as c:
         root = await c.post("/api/folders", json={"name": "RootA", "parent_id": None})
@@ -182,6 +225,27 @@ async def test_download_not_found(client):
     async with client as c:
         r = await c.get("/api/files/9999/download")
     assert r.status_code == 404
+
+
+async def test_rename_file(mock_tg, client):
+    async with client as c:
+        up = await c.post("/api/upload", files={"file": ("old.txt", b"d", "text/plain")})
+        fid = up.json()["id"]
+        renamed = await c.patch(f"/api/files/{fid}", json={"name": "new.txt"})
+        listed = await c.get("/api/files")
+
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "new.txt"
+    assert listed.json()[0]["name"] == "new.txt"
+
+
+async def test_rename_file_rejects_slashes(mock_tg, client):
+    async with client as c:
+        up = await c.post("/api/upload", files={"file": ("old.txt", b"d", "text/plain")})
+        fid = up.json()["id"]
+        r = await c.patch(f"/api/files/{fid}", json={"name": "bad/name.txt"})
+
+    assert r.status_code == 400
 
 
 async def test_preview_image(mock_tg, client):
@@ -269,3 +333,132 @@ async def test_storage_stats(mock_tg, client):
     data = r.json()
     assert data["file_count"] == 1
     assert data["used_bytes"] == len(b"hello")
+
+
+async def test_update_telegram_settings_writes_env(monkeypatch, tmp_path, client):
+    env_path = tmp_path / ".env"
+    monkeypatch.setenv("TELECLOUD_ENV_FILE", str(env_path))
+    monkeypatch.setenv("TELEGRAM_INGEST_UPDATES", "false")
+
+    async def ok_test(self):
+        return {"bot": {"username": "vault_bot"}, "chat": {"id": "-1001"}}
+
+    with patch("backend.telegram.TelegramClient.test_connection", ok_test):
+        async with client as c:
+            r = await c.put(
+                "/api/settings/telegram",
+                json={
+                    "bot_token": "123:ABC",
+                    "chat_id": "-1001",
+                    "api_base_url": "https://api.telegram.org",
+                },
+            )
+
+    assert r.status_code == 200
+    assert r.json()["bot_token_set"] is True
+    assert r.json()["bot_token"] == "123:ABC"
+    assert "BOT_TOKEN=123:ABC" in env_path.read_text()
+    assert os.environ["CHAT_ID"] == "-1001"
+
+
+async def test_get_telegram_settings_reads_env(monkeypatch, client):
+    monkeypatch.setenv("BOT_TOKEN", "env-token")
+    monkeypatch.setenv("CHAT_ID", "-1002")
+    monkeypatch.setenv("TELEGRAM_API_BASE_URL", "https://telegram.example")
+
+    async with client as c:
+        r = await c.get("/api/settings/telegram")
+
+    assert r.status_code == 200
+    assert r.json() == {
+        "bot_token_set": True,
+        "bot_token": "env-token",
+        "chat_id": "-1002",
+        "api_base_url": "https://telegram.example",
+    }
+
+
+async def test_create_and_download_share_link(mock_tg, client):
+    async with client as c:
+        up = await c.post("/api/upload", files={"file": ("shared.txt", b"d", "text/plain")})
+        fid = up.json()["id"]
+        share = await c.post(f"/api/files/{fid}/share", json={"expires_in_seconds": 60})
+        token = share.json()["token"]
+        r = await c.get(f"/api/share/{token}")
+
+    assert share.status_code == 200
+    assert r.status_code == 200
+    assert r.content == b"fake file content"
+
+
+async def test_share_settings_controls_share_url(monkeypatch, tmp_path, mock_tg, client):
+    monkeypatch.setenv("TELECLOUD_ENV_FILE", str(tmp_path / ".env"))
+
+    async with client as c:
+        settings = await c.put("/api/settings/share", json={"base_url": "http://localhost:8765"})
+        up = await c.post("/api/upload", files={"file": ("shared.txt", b"d", "text/plain")})
+        fid = up.json()["id"]
+        share = await c.post(f"/api/files/{fid}/share", json={"expires_in_seconds": 60})
+
+    assert settings.status_code == 200
+    assert settings.json()["base_url"] == "http://localhost:8765"
+    assert share.json()["url"].startswith("http://localhost:8765/api/share/")
+    assert "TELECLOUD_SHARE_BASE_URL=http://localhost:8765" in (tmp_path / ".env").read_text()
+
+
+async def test_server_settings_update_idle_timeout(monkeypatch, tmp_path, client):
+    monkeypatch.setenv("TELECLOUD_ENV_FILE", str(tmp_path / ".env"))
+    app.state.idle_timeout_seconds = 900
+
+    async with client as c:
+        updated = await c.put("/api/settings/server", json={"idle_timeout_seconds": 300})
+        current = await c.get("/api/settings/server")
+
+    assert updated.status_code == 200
+    assert updated.json()["idle_timeout_seconds"] == 300
+    assert current.json()["idle_timeout_seconds"] == 300
+    assert app.state.idle_timeout_seconds == 300
+    assert "TELECLOUD_IDLE_TIMEOUT=300" in (tmp_path / ".env").read_text()
+
+
+async def test_shutdown_server_sets_flag(client):
+    app.state.shutdown_requested = False
+
+    async with client as c:
+        r = await c.post("/api/server/shutdown")
+
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+    assert app.state.shutdown_requested is True
+    app.state.shutdown_requested = False
+
+
+async def test_share_link_expiry(mock_tg, client):
+    async with client as c:
+        up = await c.post("/api/upload", files={"file": ("expired.txt", b"d", "text/plain")})
+        fid = up.json()["id"]
+        share = await c.post(f"/api/files/{fid}/share", json={"expires_in_seconds": 1})
+        token = share.json()["token"]
+        await asyncio.sleep(1.1)
+        r = await c.get(f"/api/share/{token}")
+
+    assert r.status_code == 410
+
+
+async def test_encrypted_upload_metadata(mock_tg, client):
+    async with client as c:
+        r = await c.post(
+            "/api/upload",
+            data={"encrypted": "true", "original_mime_type": "image/png"},
+            files={"file": ("secret.png", b"encrypted bytes", "application/octet-stream")},
+        )
+        fid = r.json()["id"]
+        preview = await c.get(f"/api/files/{fid}/preview")
+        download = await c.get(f"/api/files/{fid}/download")
+
+    assert r.status_code == 201
+    assert r.json()["encrypted"] is True
+    assert r.json()["mime_type"] == "image/png"
+    assert r.json()["has_thumbnail"] is False
+    assert preview.status_code == 415
+    assert download.headers["x-vault-encrypted"] == "1"
