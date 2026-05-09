@@ -330,6 +330,90 @@ async def run_server(args: argparse.Namespace) -> int:
     return 0
 
 
+async def run_inspect_messages(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="telecloud inspect-messages",
+        description="Read recent messages from the Telegram channel and show what sync would see.",
+    )
+    parser.add_argument("--env-file", default=".env")
+    parser.add_argument("--limit", type=int, default=20, help="Number of recent messages to inspect (default 20)")
+    args = parser.parse_args(argv)
+
+    env_path = Path(args.env_file).expanduser()
+    if env_path.exists():
+        load_dotenv(env_path, override=True)
+    else:
+        load_dotenv()
+
+    api_id_raw = os.getenv("TG_API_ID", "").strip()
+    api_hash = os.getenv("TG_API_HASH", "").strip()
+    chat_id_raw = os.getenv("CHAT_ID", "").strip()
+    session_str = os.getenv("TG_SESSION_STRING", "").strip()
+
+    if not api_id_raw or not api_hash:
+        print("Error: TG_API_ID / TG_API_HASH not set", flush=True)
+        return 1
+    if not session_str:
+        print("Error: TG_SESSION_STRING not set — run 'telecloud sync-auth' first", flush=True)
+        return 1
+
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+        from telethon.utils import pack_bot_file_id
+    except ImportError:
+        print("Error: telethon not installed — pip install -e .", flush=True)
+        return 1
+
+    from backend.sync import parse_caption
+
+    client = TelegramClient(StringSession(session_str), int(api_id_raw), api_hash)
+    await client.connect()
+    if not await client.is_user_authorized():
+        print("Error: session expired — run 'telecloud sync-auth' again", flush=True)
+        await client.disconnect()
+        return 1
+
+    try:
+        chat_id = int(chat_id_raw)
+    except ValueError:
+        chat_id = chat_id_raw
+
+    print(f"\n=== inspect last {args.limit} messages in chat {chat_id_raw} ===\n", flush=True)
+
+    count = 0
+    async for message in client.iter_messages(chat_id, limit=args.limit):
+        count += 1
+        caption = message.message or ""
+        parsed = parse_caption(caption)
+        has_media = message.media is not None
+
+        file_id_from_media = None
+        if has_media and parsed is not None:
+            try:
+                file_id_from_media = pack_bot_file_id(message.media)
+            except Exception as e:
+                file_id_from_media = f"[pack failed: {e}]"
+
+        print(f"[msg {message.id}]", flush=True)
+        print(f"  media     : {type(message.media).__name__ if has_media else 'none'}", flush=True)
+        print(f"  caption   : {caption[:120] or '(empty)'}", flush=True)
+        print(f"  parse_ok  : {parsed is not None}", flush=True)
+        if parsed:
+            print(f"  name      : {parsed['name']}", flush=True)
+            print(f"  size      : {parsed['size']}", flush=True)
+        if file_id_from_media:
+            ok = not str(file_id_from_media).startswith("[")
+            print(f"  file_id   : {'✓ ok' if ok else file_id_from_media}", flush=True)
+        print(flush=True)
+
+    if count == 0:
+        print("(no messages found — is CHAT_ID correct?)", flush=True)
+
+    await client.disconnect()
+    return 0
+
+
 async def run_backfill_captions(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="telecloud backfill-captions",
@@ -452,6 +536,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(run_sync_auth(argv[1:]))
     if argv and argv[0] == "backfill-captions":
         return asyncio.run(run_backfill_captions(argv[1:]))
+    if argv and argv[0] == "inspect-messages":
+        return asyncio.run(run_inspect_messages(argv[1:]))
     args = parse_args(argv)
     if args.server:
         return spawn_servers(args)
