@@ -1,9 +1,10 @@
 import pytest
+import tempfile
 import backend.database as db_module
 from pathlib import Path
 
 # Redirect to temp DB before any import side-effects
-db_module.DB_PATH = Path("/tmp/test_vault.db")
+db_module.DB_PATH = Path(tempfile.gettempdir()) / "test_vault.db"
 
 from backend.database import (
     init_db, insert_file, get_file, list_files,
