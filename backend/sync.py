@@ -29,6 +29,7 @@ def make_caption(
     uid: Optional[str] = None,
     tg_file_id: Optional[str] = None,
     tg_thumb_file_id: Optional[str] = None,
+    bot_message_id: Optional[int] = None,
 ) -> str:
     data: dict = {
         "v": CAPTION_VERSION,
@@ -44,6 +45,8 @@ def make_caption(
         data["f"] = tg_file_id
     if tg_thumb_file_id:
         data["th"] = tg_thumb_file_id
+    if bot_message_id is not None:
+        data["mid"] = bot_message_id
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -68,6 +71,7 @@ def parse_caption(text: str) -> Optional[dict]:
         "tg_thumb_file_id": data.get("th"),
         "encrypted": bool(data.get("e", 0)),
         "uploaded_at": data["t"],
+        "bot_message_id": data.get("mid") or None,
     }
 
 
@@ -143,13 +147,18 @@ async def _import_message(
         *folder_parts, raw_name = raw_name.split("/")
         folder_id = await _ensure_sync_folder_path(folder_parts)
 
+    # Prefer the Bot API message_id embedded in the caption ("mid") so that
+    # deleteMessage works correctly from any device (Bot API and MTProto use
+    # different message IDs for the same message in private DM chats).
+    tg_msg_id = parsed.get("bot_message_id") or message.id
+
     await insert_file(
         name=raw_name,
         size=parsed["size"],
         mime_type=parsed["mime_type"],
         tg_file_id=file_id,
         tg_thumb_file_id=parsed["tg_thumb_file_id"],
-        tg_message_id=message.id,
+        tg_message_id=tg_msg_id,
         uploaded_at=parsed["uploaded_at"],
         encrypted=parsed["encrypted"],
         folder_id=folder_id,

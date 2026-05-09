@@ -533,7 +533,7 @@ async def api_upload(
         parts = await get_folder_path(folder_id)
         if parts:
             caption_name = "/".join(parts) + "/" + file.filename
-    # Embed metadata as caption so any device can sync from Telegram history
+    # Send without bot_message_id first (unknown until after send)
     caption = make_caption(
         name=caption_name,
         size=len(content),
@@ -546,6 +546,20 @@ async def api_upload(
         file.filename, content, file.content_type or "application/octet-stream",
         caption=caption,
     )
+    # Update caption to embed Bot API message_id so any device can delete correctly
+    bot_msg_id = tg_result["message_id"]
+    final_caption = make_caption(
+        name=caption_name,
+        size=len(content),
+        mime_type=stored_mime_type,
+        encrypted=encrypted,
+        uploaded_at=now,
+        uid=file_uid,
+        tg_file_id=tg_result["file_id"],
+        tg_thumb_file_id=tg_result.get("thumb_file_id"),
+        bot_message_id=bot_msg_id,
+    )
+    await tg.edit_message_caption(bot_msg_id, final_caption)
     thumb_file_id = None if encrypted else tg_result.get("thumb_file_id")
     new_id = await insert_file(
         name=file.filename,
