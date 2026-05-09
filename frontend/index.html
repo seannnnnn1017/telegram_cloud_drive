@@ -1,0 +1,598 @@
+<!doctype html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<title>Vault — Files</title>
+<meta name="viewport" content="width=1440">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0a0a;--bg-1:#0f0f0f;--bg-2:#141414;
+    --line:rgba(255,255,255,0.07);--line-2:rgba(255,255,255,0.12);
+    --ink:#f2f2f0;--ink-2:#a8a8a3;--ink-3:#6a6a64;--ink-4:#3d3d39;
+    --green:#00ff66;--green-glow:#7dffae;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);font-family:'Inter',sans-serif;-webkit-font-smoothing:antialiased}
+  .mono{font-family:'JetBrains Mono',monospace}
+  button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer;padding:0}
+  ::selection{background:var(--green);color:#000}
+
+  .wrap{max-width:980px;margin:0 auto;padding:56px 32px 100px;min-height:100vh;display:flex;flex-direction:column;gap:36px}
+
+  /* Header */
+  .head{display:flex;align-items:center;gap:16px}
+  .mark{width:24px;height:24px;border-radius:6px;background:var(--green);display:grid;place-items:center;color:#001b0b;font-weight:600;font-size:12px;box-shadow:0 0 0 1px rgba(0,255,102,0.3),0 8px 22px -8px rgba(0,255,102,0.5);flex-shrink:0}
+  .brand{font-weight:500;letter-spacing:0.04em;font-size:14px}
+  .brand small{color:var(--ink-3);font-weight:400;letter-spacing:0;margin-left:8px;font-size:12px}
+  .head .grow{flex:1}
+  .upload-btn{display:flex;align-items:center;gap:8px;height:32px;padding:0 14px;border-radius:7px;background:var(--green);color:#001b0b;font-weight:500;font-size:13px;transition:background .12s}
+  .upload-btn:hover{background:var(--green-glow)}
+  #file-input{display:none}
+
+  /* Storage */
+  .storage .label{font-size:12px;letter-spacing:0.18em;text-transform:uppercase;color:var(--ink-3)}
+  .storage .num{font-family:'JetBrains Mono',monospace;font-size:44px;letter-spacing:-0.025em;line-height:1}
+  .storage .num small{color:var(--ink-3);font-size:18px;margin-left:4px}
+  .bar{margin-top:14px;height:3px;background:#1a1a1a;border-radius:99px;position:relative;overflow:hidden}
+  .bar i{position:absolute;left:0;top:0;height:100%;background:var(--green);transition:width .4s}
+
+  /* Toolbar */
+  .toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .search{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:8px;padding:8px 12px;background:var(--bg-1);font-size:13px;flex:1;max-width:340px}
+  .search input{background:none;border:0;outline:none;color:var(--ink);flex:1;font:inherit}
+  .search input::placeholder{color:var(--ink-3)}
+  .toolbar .grow{flex:1}
+  .tabs{display:flex;gap:4px}
+  .tab{padding:6px 12px;font-size:12.5px;color:var(--ink-3);border-radius:6px;cursor:pointer;transition:color .1s,background .1s}
+  .tab:hover{color:var(--ink-2)}
+  .tab.on{color:var(--ink);background:rgba(255,255,255,0.04)}
+  .tab .c{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--ink-4);margin-left:6px}
+  .tab.on .c{color:var(--ink-3)}
+  .ico-btn{width:32px;height:32px;border-radius:7px;border:1px solid var(--line);display:grid;place-items:center;color:var(--ink-3);background:transparent;transition:color .1s,border-color .1s}
+  .ico-btn:hover{color:var(--ink);border-color:var(--line-2)}
+
+  /* File list */
+  .list{border-top:1px solid var(--line)}
+  .list-header{display:grid;grid-template-columns:20px 1fr 110px 130px 90px 32px;gap:16px;padding:10px 4px;border-bottom:1px solid var(--line);font-size:10.5px;letter-spacing:0.18em;text-transform:uppercase;color:var(--ink-3);font-weight:500}
+  .list-header span{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+  .list-header span:hover{color:var(--ink-2)}
+  .list-header span.sort-active{color:var(--ink-2)}
+
+  .row{display:grid;grid-template-columns:20px 1fr 110px 130px 90px 32px;gap:16px;align-items:center;padding:14px 4px;border-bottom:1px solid var(--line);font-size:13.5px;cursor:pointer;transition:background .12s;position:relative}
+  .row:hover{background:rgba(255,255,255,0.02)}
+  .row:last-child{border-bottom:0}
+  .row.selected{background:rgba(0,255,102,0.04)}
+
+  .cb{width:14px;height:14px;border-radius:3px;border:1px solid var(--line-2);background:transparent;cursor:pointer;accent-color:var(--green);flex-shrink:0}
+
+  .name-cell{display:flex;align-items:center;gap:14px;min-width:0}
+  .ic{width:30px;height:30px;border-radius:7px;display:grid;place-items:center;flex-shrink:0;background:var(--bg-2);border:1px solid var(--line);color:var(--ink-2)}
+  .ic.img{color:#d4b78a}.ic.vid{color:#a8c8ff}.ic.doc{color:var(--ink-2)}.ic.zip{color:#c8a8ff}.ic.folder{color:var(--green);background:rgba(0,255,102,0.06);border-color:rgba(0,255,102,0.25)}
+  .fname{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .fmeta{display:block;color:var(--ink-3);font-family:'JetBrains Mono',monospace;font-size:10.5px;margin-top:2px}
+
+  .col{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--ink-2)}
+  .col.dim{color:var(--ink-3)}
+  .col.size{text-align:right}
+  .col.size .unit{color:var(--ink-3);margin-left:2px}
+
+  .more-btn{width:24px;height:24px;border-radius:5px;display:grid;place-items:center;color:var(--ink-3);opacity:0;transition:opacity .1s}
+  .row:hover .more-btn{opacity:1}
+  .more-btn:hover{background:rgba(255,255,255,0.05);color:var(--ink)}
+
+  /* Context menu */
+  .ctx-menu{position:fixed;background:var(--bg-1);border:1px solid var(--line-2);border-radius:9px;padding:4px;min-width:160px;z-index:100;box-shadow:0 8px 32px rgba(0,0,0,0.6)}
+  .ctx-menu button{display:flex;align-items:center;gap:10px;width:100%;padding:8px 12px;border-radius:6px;font-size:13px;color:var(--ink-2);text-align:left}
+  .ctx-menu button:hover{background:rgba(255,255,255,0.05);color:var(--ink)}
+  .ctx-menu button.danger:hover{color:#ff6b6b;background:rgba(255,107,107,0.08)}
+  .ctx-menu .sep{height:1px;background:var(--line);margin:4px 0}
+
+  /* Bulk bar */
+  .bulk-bar{position:fixed;bottom:32px;left:50%;transform:translateX(-50%);background:var(--bg-1);border:1px solid var(--line-2);border-radius:12px;padding:12px 20px;display:flex;align-items:center;gap:16px;font-size:13px;z-index:50;box-shadow:0 8px 32px rgba(0,0,0,0.7);opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;transform:translateX(-50%) translateY(10px)}
+  .bulk-bar.show{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0)}
+  .bulk-bar .count{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--ink-3)}
+  .bulk-bar .gap{flex:1}
+  .bulk-btn{padding:6px 14px;border-radius:7px;font-size:12.5px;font-weight:500}
+  .bulk-btn.del{background:rgba(255,107,107,0.12);color:#ff6b6b}
+  .bulk-btn.del:hover{background:rgba(255,107,107,0.2)}
+  .bulk-btn.cancel{color:var(--ink-3)}
+  .bulk-btn.cancel:hover{color:var(--ink)}
+
+  /* Upload overlay */
+  .drop-overlay{position:fixed;inset:0;background:rgba(0,255,102,0.05);border:2px dashed rgba(0,255,102,0.4);z-index:200;display:none;place-items:center;flex-direction:column;gap:12px;font-size:16px;color:var(--green)}
+  .drop-overlay.show{display:grid}
+
+  /* Upload progress */
+  .upload-toast{position:fixed;bottom:24px;right:24px;background:var(--bg-1);border:1px solid var(--line-2);border-radius:10px;padding:14px 18px;min-width:240px;z-index:300;box-shadow:0 8px 24px rgba(0,0,0,0.6);display:none}
+  .upload-toast.show{display:block}
+  .upload-toast .ut-name{font-size:12px;color:var(--ink-2);margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ut-bar{height:2px;background:#1a1a1a;border-radius:99px;overflow:hidden}
+  .ut-bar i{height:100%;background:var(--green);transition:width .15s;display:block}
+
+  /* Toast */
+  .toast-area{position:fixed;top:24px;right:24px;display:flex;flex-direction:column;gap:8px;z-index:400}
+  .toast{background:var(--bg-1);border:1px solid var(--line-2);border-radius:8px;padding:10px 16px;font-size:13px;color:var(--ink);box-shadow:0 4px 16px rgba(0,0,0,0.5);animation:slide-in .2s ease}
+  .toast.err{border-color:rgba(255,107,107,0.4);color:#ff9f9f}
+  @keyframes slide-in{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:none}}
+
+  /* Preview modal */
+  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:500;display:none;place-items:center}
+  .modal-bg.show{display:grid}
+  .modal{background:var(--bg-1);border:1px solid var(--line-2);border-radius:12px;max-width:90vw;max-height:90vh;overflow:auto;position:relative}
+  .modal img{max-width:85vw;max-height:85vh;display:block;border-radius:8px}
+  .modal iframe{width:80vw;height:80vh;border:none;border-radius:8px}
+  .modal-close{position:absolute;top:12px;right:12px;width:28px;height:28px;border-radius:99px;background:rgba(255,255,255,0.08);display:grid;place-items:center;font-size:16px;color:var(--ink-2);z-index:1}
+  .modal-close:hover{background:rgba(255,255,255,0.14);color:var(--ink)}
+
+  /* Empty state */
+  .empty{padding:80px 0;text-align:center;color:var(--ink-3);font-size:14px}
+
+  /* Footer */
+  .foot{margin-top:auto;padding-top:24px;display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:var(--ink-4)}
+  .foot .live{color:var(--green);display:flex;align-items:center;gap:8px}
+  .foot .live::before{content:"";width:5px;height:5px;border-radius:99px;background:var(--green);box-shadow:0 0 10px var(--green);animation:pulse 1.6s infinite}
+  @keyframes pulse{50%{opacity:.4}}
+</style>
+</head>
+<body>
+
+<!-- SVG Icons -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-img" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="m4 18 5-5 4 4 3-3 4 4"/></symbol>
+  <symbol id="i-vid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3z"/></symbol>
+  <symbol id="i-doc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+  <symbol id="i-zip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M12 3v4M12 9v2M12 13v2M12 17v2"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12l7 7 7-7"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-dots" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></symbol>
+  <symbol id="i-arrow-d" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-arrow-u" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m6 15 6-6 6 6"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-sort" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M7 5v14M3 9l4-4 4 4M17 19V5M13 15l4 4 4-4"/></symbol>
+</defs></svg>
+
+<!-- Drop Overlay -->
+<div class="drop-overlay" id="drop-overlay">
+  <svg width="32" height="32"><use href="#i-up"/></svg>
+  放開以上傳
+</div>
+
+<!-- Upload Progress Toast -->
+<div class="upload-toast" id="upload-toast">
+  <div class="ut-name" id="ut-name">uploading...</div>
+  <div class="ut-bar"><i id="ut-prog" style="width:0%"></i></div>
+</div>
+
+<!-- Toast Area -->
+<div class="toast-area" id="toast-area"></div>
+
+<!-- Context Menu -->
+<div class="ctx-menu" id="ctx-menu" style="display:none"></div>
+
+<!-- Bulk Bar -->
+<div class="bulk-bar" id="bulk-bar">
+  <span class="count" id="bulk-count">0 selected</span>
+  <span class="gap"></span>
+  <button class="bulk-btn cancel" id="bulk-cancel">取消</button>
+  <button class="bulk-btn del" id="bulk-del">
+    <svg width="12" height="12"><use href="#i-trash"/></svg> 刪除全部
+  </button>
+</div>
+
+<!-- Preview Modal -->
+<div class="modal-bg" id="modal-bg">
+  <div class="modal" id="modal-content">
+    <button class="modal-close" id="modal-close"><svg width="12" height="12"><use href="#i-close"/></svg></button>
+  </div>
+</div>
+
+<!-- Main -->
+<div class="wrap">
+  <header class="head">
+    <div class="mark">V</div>
+    <div class="brand">Vault<small>Personal</small></div>
+    <div class="grow"></div>
+    <button class="upload-btn" id="upload-btn">
+      <svg width="13" height="13"><use href="#i-up"/></svg>
+      上傳
+    </button>
+    <input type="file" id="file-input" multiple>
+  </header>
+
+  <section class="storage">
+    <div class="label">Storage</div>
+    <div class="num" id="storage-num">—<small></small></div>
+    <div class="bar"><i id="storage-bar" style="width:0%"></i></div>
+  </section>
+
+  <section class="toolbar">
+    <div class="search">
+      <svg width="13" height="13" style="color:var(--ink-3)"><use href="#i-search"/></svg>
+      <input id="search-input" placeholder="搜尋檔案…" autocomplete="off">
+    </div>
+    <div class="grow"></div>
+    <div class="tabs" id="tabs">
+      <span class="tab on" data-type="">全部<span class="c" id="cnt-all">0</span></span>
+      <span class="tab" data-type="image">圖片<span class="c" id="cnt-img">0</span></span>
+      <span class="tab" data-type="video">影片<span class="c" id="cnt-vid">0</span></span>
+      <span class="tab" data-type="document">文件<span class="c" id="cnt-doc">0</span></span>
+    </div>
+    <button class="ico-btn" id="sort-btn" title="排序"><svg width="14" height="14"><use href="#i-sort"/></svg></button>
+  </section>
+
+  <section class="list" id="file-list-section">
+    <div class="list-header">
+      <span></span>
+      <span data-sort="name" id="h-name">名稱</span>
+      <span data-sort="type" id="h-type">類型</span>
+      <span data-sort="date" id="h-date" class="sort-active">修改時間 <svg width="8" height="8"><use href="#i-arrow-d"/></svg></span>
+      <span data-sort="size" id="h-size" style="justify-content:flex-end">大小</span>
+      <span></span>
+    </div>
+    <div id="file-list"></div>
+  </section>
+
+  <footer class="foot">
+    <span class="live" id="sync-status">連線中…</span>
+    <span>Telegram 儲存</span>
+  </footer>
+</div>
+
+<script>
+const state = {
+  files: [],
+  allFiles: [],
+  selected: new Set(),
+  sort: 'date',
+  order: 'desc',
+  type: '',
+  q: '',
+};
+
+function fmtSize(bytes) {
+  if (bytes < 1024) return `${bytes} <span class="unit">B</span>`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} <span class="unit">KB</span>`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(2)} <span class="unit">MB</span>`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} <span class="unit">GB</span>`;
+}
+
+function fmtDate(iso) {
+  const d = new Date(iso), now = new Date();
+  const diff = (now - d) / 1000;
+  if (diff < 60) return `${Math.floor(diff)} 秒前`;
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分鐘前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小時前`;
+  if (diff < 172800) return '昨天';
+  return d.toLocaleDateString('zh-TW');
+}
+
+function mimeIcon(mime) {
+  if (!mime) return 'doc';
+  if (mime.startsWith('image/')) return 'img';
+  if (mime.startsWith('video/')) return 'vid';
+  if (mime === 'application/zip' || mime === 'application/x-rar-compressed') return 'zip';
+  return 'doc';
+}
+
+function mimeLabel(mime) {
+  if (!mime) return '檔案';
+  const parts = mime.split('/');
+  return (parts[1] || parts[0]).toUpperCase().replace('OCTET-STREAM', '檔案');
+}
+
+function isPreviewable(mime) {
+  return mime && (mime.startsWith('image/') || mime === 'application/pdf');
+}
+
+function toast(msg, isErr = false) {
+  const el = document.createElement('div');
+  el.className = `toast${isErr ? ' err' : ''}`;
+  el.textContent = msg;
+  document.getElementById('toast-area').append(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+let ctxOpen = false;
+function openCtx(e, file) {
+  e.stopPropagation();
+  const menu = document.getElementById('ctx-menu');
+  const canPreview = isPreviewable(file.mime_type);
+  menu.innerHTML = `
+    ${canPreview ? `<button data-action="preview"><svg width="12" height="12"><use href="#i-eye"/></svg> 預覽</button>` : ''}
+    <button data-action="download"><svg width="12" height="12"><use href="#i-down"/></svg> 下載</button>
+    <div class="sep"></div>
+    <button data-action="delete" class="danger"><svg width="12" height="12"><use href="#i-trash"/></svg> 刪除</button>
+  `;
+  menu.style.display = 'block';
+  const x = Math.min(e.clientX, window.innerWidth - 180);
+  const y = Math.min(e.clientY, window.innerHeight - 140);
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  ctxOpen = true;
+  menu.onclick = (ev) => {
+    const action = ev.target.closest('[data-action]')?.dataset.action;
+    if (action === 'preview') showPreview(file);
+    if (action === 'download') doDownload(file);
+    if (action === 'delete') doDelete(file.id);
+    closeCtx();
+  };
+}
+function closeCtx() {
+  document.getElementById('ctx-menu').style.display = 'none';
+  ctxOpen = false;
+}
+document.addEventListener('click', () => { if (ctxOpen) closeCtx(); });
+
+function showPreview(file) {
+  const bg = document.getElementById('modal-bg');
+  const content = document.getElementById('modal-content');
+  let inner = '';
+  if (file.mime_type && file.mime_type.startsWith('image/')) {
+    inner = `<img src="/api/files/${file.id}/preview" alt="${file.name}">`;
+  } else if (file.mime_type === 'application/pdf') {
+    inner = `<iframe src="/api/files/${file.id}/preview" title="${file.name}"></iframe>`;
+  }
+  content.innerHTML = `<button class="modal-close" id="modal-close"><svg width="12" height="12"><use href="#i-close"/></svg></button>${inner}`;
+  bg.classList.add('show');
+  document.getElementById('modal-close').onclick = closeModal;
+}
+function closeModal() { document.getElementById('modal-bg').classList.remove('show'); }
+document.getElementById('modal-bg').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeModal();
+});
+
+function doDownload(file) {
+  const a = document.createElement('a');
+  a.href = `/api/files/${file.id}/download`;
+  a.download = file.name;
+  a.click();
+}
+
+async function doDelete(id) {
+  if (!confirm('確定要刪除這個檔案嗎？')) return;
+  const r = await fetch(`/api/files/${id}`, { method: 'DELETE' });
+  if (r.ok) { toast('已刪除'); loadFiles(); }
+  else { toast('刪除失敗', true); }
+}
+
+function updateBulkBar() {
+  const bar = document.getElementById('bulk-bar');
+  const n = state.selected.size;
+  document.getElementById('bulk-count').textContent = `已選 ${n} 個`;
+  bar.classList.toggle('show', n > 0);
+}
+
+document.getElementById('bulk-cancel').onclick = () => {
+  state.selected.clear();
+  renderFiles();
+};
+
+document.getElementById('bulk-del').onclick = async () => {
+  if (!confirm(`確定要刪除 ${state.selected.size} 個檔案嗎？`)) return;
+  const ids = Array.from(state.selected);
+  const r = await fetch('/api/files/bulk-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+  if (r.ok) {
+    const data = await r.json();
+    toast(`已刪除 ${data.deleted} 個檔案`);
+    state.selected.clear();
+    loadFiles();
+  } else {
+    toast('批次刪除失敗', true);
+  }
+};
+
+async function uploadFile(file) {
+  const MAX = 20 * 1024 * 1024;
+  if (file.size > MAX) { toast(`${file.name} 超過 20 MB 限制`, true); return; }
+
+  const toastEl = document.getElementById('upload-toast');
+  document.getElementById('ut-name').textContent = file.name;
+  document.getElementById('ut-prog').style.width = '0%';
+  toastEl.classList.add('show');
+
+  const xhr = new XMLHttpRequest();
+  const form = new FormData();
+  form.append('file', file);
+
+  await new Promise((resolve) => {
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        document.getElementById('ut-prog').style.width = `${(e.loaded / e.total * 100).toFixed(0)}%`;
+      }
+    });
+    xhr.onload = () => {
+      toastEl.classList.remove('show');
+      if (xhr.status === 201) { toast(`${file.name} 上傳成功`); loadFiles(); loadStorage(); }
+      else {
+        try { toast(JSON.parse(xhr.responseText).detail || '上傳失敗', true); }
+        catch { toast('上傳失敗', true); }
+      }
+      resolve();
+    };
+    xhr.onerror = () => { toastEl.classList.remove('show'); toast('網路錯誤', true); resolve(); };
+    xhr.open('POST', '/api/upload');
+    xhr.send(form);
+  });
+}
+
+document.getElementById('upload-btn').onclick = () => document.getElementById('file-input').click();
+document.getElementById('file-input').onchange = async (e) => {
+  for (const f of e.target.files) await uploadFile(f);
+  e.target.value = '';
+};
+
+document.addEventListener('dragover', (e) => { e.preventDefault(); document.getElementById('drop-overlay').classList.add('show'); });
+document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.getElementById('drop-overlay').classList.remove('show'); });
+document.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  document.getElementById('drop-overlay').classList.remove('show');
+  for (const f of e.dataTransfer.files) await uploadFile(f);
+});
+
+function updateSortHeaders() {
+  ['name','type','date','size'].forEach(k => {
+    const el = document.getElementById(`h-${k}`);
+    if (!el) return;
+    const active = state.sort === k;
+    el.classList.toggle('sort-active', active);
+    const existingSvg = el.querySelector('svg');
+    if (existingSvg) existingSvg.remove();
+    if (active) {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
+      svg.setAttribute('width','8'); svg.setAttribute('height','8');
+      const use = document.createElementNS('http://www.w3.org/2000/svg','use');
+      use.setAttribute('href', state.order === 'asc' ? '#i-arrow-u' : '#i-arrow-d');
+      svg.appendChild(use); el.appendChild(svg);
+    }
+  });
+}
+
+document.querySelector('.list-header').addEventListener('click', (e) => {
+  const col = e.target.closest('[data-sort]');
+  if (!col) return;
+  const key = col.dataset.sort;
+  if (state.sort === key) state.order = state.order === 'desc' ? 'asc' : 'desc';
+  else { state.sort = key; state.order = 'desc'; }
+  loadFiles();
+});
+
+document.getElementById('tabs').addEventListener('click', (e) => {
+  const tab = e.target.closest('.tab');
+  if (!tab) return;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('on'));
+  tab.classList.add('on');
+  state.type = tab.dataset.type;
+  state.selected.clear();
+  loadFiles();
+});
+
+let searchTimer;
+document.getElementById('search-input').addEventListener('input', (e) => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { state.q = e.target.value.trim(); loadFiles(); }, 250);
+});
+
+function renderFiles() {
+  const list = document.getElementById('file-list');
+  if (state.files.length === 0) {
+    list.innerHTML = '<div class="empty">沒有檔案</div>';
+    updateBulkBar();
+    return;
+  }
+  list.innerHTML = state.files.map(f => {
+    const icon = mimeIcon(f.mime_type);
+    const sel = state.selected.has(f.id);
+    return `
+    <div class="row${sel ? ' selected' : ''}" data-id="${f.id}">
+      <input type="checkbox" class="cb" data-cb="${f.id}" ${sel ? 'checked' : ''}>
+      <div class="name-cell">
+        <div class="ic ${icon}"><svg width="14" height="14"><use href="#i-${icon}"/></svg></div>
+        <div>
+          <div class="fname">${f.name}</div>
+          <span class="fmeta">${mimeLabel(f.mime_type)}</span>
+        </div>
+      </div>
+      <div class="col dim">${mimeLabel(f.mime_type)}</div>
+      <div class="col">${fmtDate(f.uploaded_at)}</div>
+      <div class="col size">${fmtSize(f.size)}</div>
+      <button class="more-btn" data-more="${f.id}"><svg width="14" height="14"><use href="#i-dots"/></svg></button>
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('.row').forEach(row => {
+    const id = parseInt(row.dataset.id);
+    const file = state.files.find(f => f.id === id);
+
+    row.querySelector('[data-cb]').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (state.selected.has(id)) state.selected.delete(id);
+      else state.selected.add(id);
+      row.classList.toggle('selected', state.selected.has(id));
+      e.target.checked = state.selected.has(id);
+      updateBulkBar();
+    });
+
+    row.querySelector('[data-more]').addEventListener('click', (e) => {
+      e.stopPropagation();
+      openCtx(e, file);
+    });
+
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('[data-cb]') || e.target.closest('[data-more]')) return;
+      if (state.selected.size > 0) {
+        if (state.selected.has(id)) state.selected.delete(id);
+        else state.selected.add(id);
+        row.classList.toggle('selected', state.selected.has(id));
+        updateBulkBar();
+      } else if (isPreviewable(file.mime_type)) {
+        showPreview(file);
+      } else {
+        doDownload(file);
+      }
+    });
+  });
+
+  updateBulkBar();
+  updateSortHeaders();
+}
+
+function updateCounts(files) {
+  document.getElementById('cnt-all').textContent = files.length;
+  document.getElementById('cnt-img').textContent = files.filter(f => f.mime_type?.startsWith('image/')).length;
+  document.getElementById('cnt-vid').textContent = files.filter(f => f.mime_type?.startsWith('video/')).length;
+  document.getElementById('cnt-doc').textContent = files.filter(f => f.mime_type?.startsWith('application/')).length;
+}
+
+async function loadStorage() {
+  try {
+    const r = await fetch('/api/storage');
+    const data = await r.json();
+    const used = data.used_bytes;
+    let label;
+    if (used < 1024 ** 2) label = `${(used / 1024).toFixed(1)}<small> KB</small>`;
+    else if (used < 1024 ** 3) label = `${(used / 1024 ** 2).toFixed(2)}<small> MB</small>`;
+    else label = `${(used / 1024 ** 3).toFixed(2)}<small> GB</small>`;
+    document.getElementById('storage-num').innerHTML = label;
+    const pct = Math.min(data.file_count * 2, 95);
+    document.getElementById('storage-bar').style.width = `${pct}%`;
+  } catch {}
+}
+
+async function loadFiles() {
+  const params = new URLSearchParams({ sort: state.sort, order: state.order });
+  if (state.q) params.set('q', state.q);
+  if (state.type) params.set('type', state.type);
+
+  try {
+    const r = await fetch(`/api/files?${params}`);
+    state.files = await r.json();
+    if (state.type || state.q) {
+      const all = await fetch('/api/files');
+      state.allFiles = await all.json();
+    } else {
+      state.allFiles = state.files;
+    }
+    updateCounts(state.allFiles);
+    renderFiles();
+    document.getElementById('sync-status').textContent = `已同步 · 剛才`;
+  } catch {
+    toast('無法連線到伺服器', true);
+  }
+}
+
+loadFiles();
+loadStorage();
+</script>
+</body>
+</html>
