@@ -256,6 +256,14 @@ const state = {
   q: '',
 };
 
+function esc(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function fmtSize(bytes) {
   if (bytes < 1024) return `${bytes} <span class="unit">B</span>`;
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} <span class="unit">KB</span>`;
@@ -335,9 +343,9 @@ function showPreview(file) {
   const content = document.getElementById('modal-content');
   let inner = '';
   if (file.mime_type && file.mime_type.startsWith('image/')) {
-    inner = `<img src="/api/files/${file.id}/preview" alt="${file.name}">`;
+    inner = `<img src="/api/files/${file.id}/preview" alt="${esc(file.name)}">`;
   } else if (file.mime_type === 'application/pdf') {
-    inner = `<iframe src="/api/files/${file.id}/preview" title="${file.name}"></iframe>`;
+    inner = `<iframe src="/api/files/${file.id}/preview" title="${esc(file.name)}"></iframe>`;
   }
   content.innerHTML = `<button class="modal-close" id="modal-close"><svg width="12" height="12"><use href="#i-close"/></svg></button>${inner}`;
   bg.classList.add('show');
@@ -499,7 +507,7 @@ function renderFiles() {
       <div class="name-cell">
         <div class="ic ${icon}"><svg width="14" height="14"><use href="#i-${icon}"/></svg></div>
         <div>
-          <div class="fname">${f.name}</div>
+          <div class="fname">${esc(f.name)}</div>
           <span class="fmeta">${mimeLabel(f.mime_type)}</span>
         </div>
       </div>
