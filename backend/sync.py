@@ -193,19 +193,25 @@ async def _run_sync(client, chat_entity) -> dict:
 
     async for message in client.iter_messages(chat_entity):
         total_seen += 1
-        telegram_msg_ids.add(message.id)
+
+        # Parse caption early so we can use the embedded Bot API message_id ("mid")
+        # for ID-space-consistent comparisons with db_msg_ids.
+        # In private DM chats, message.id (MTProto) ≠ Bot API message_id — using
+        # the "mid" field normalises both sides to the same ID space.
+        caption = message.message or ""
+        parsed = parse_caption(caption)
+        effective_id = (parsed or {}).get("bot_message_id") or message.id
+        telegram_msg_ids.add(effective_id)
 
         # Never re-import intentionally deleted messages
-        if message.id in deleted_msg_ids:
+        if effective_id in deleted_msg_ids:
             continue
 
         # Quick pre-filter by message_id
-        if message.id in known_msg_ids:
+        if effective_id in known_msg_ids:
             skipped_exists += 1
             continue
 
-        caption = message.message or ""
-        parsed = parse_caption(caption)
         if parsed is None:
             skipped_no_caption += 1
             continue
