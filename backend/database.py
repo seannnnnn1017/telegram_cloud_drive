@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS files (
     tg_message_id  INTEGER NOT NULL,
     uploaded_at    TEXT    NOT NULL,
     encrypted      INTEGER NOT NULL DEFAULT 0,
-    uid            TEXT
+    uid            TEXT,
+    favorite       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_name ON files(name);
 CREATE INDEX IF NOT EXISTS idx_date ON files(uploaded_at);
@@ -27,7 +28,10 @@ CREATE TABLE IF NOT EXISTS folders (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     parent_id   INTEGER,
     name        TEXT NOT NULL,
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    uid         TEXT,
+    tg_message_id INTEGER,
+    favorite    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
 CREATE TABLE IF NOT EXISTS shares (
@@ -56,8 +60,28 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE files ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0")
         if "uid" not in columns:
             await db.execute("ALTER TABLE files ADD COLUMN uid TEXT")
+        if "favorite" not in columns:
+            await db.execute("ALTER TABLE files ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
+        await db.execute(
+            """
+            DELETE FROM files
+            WHERE uid IS NOT NULL
+              AND id NOT IN (
+                SELECT MIN(id) FROM files WHERE uid IS NOT NULL GROUP BY uid
+              )
+            """
+        )
         await db.execute("CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_files_uid ON files(uid)")
+        await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_files_uid_unique ON files(uid) WHERE uid IS NOT NULL")
+        async with db.execute("PRAGMA table_info(folders)") as cur:
+            folder_columns = {row[1] for row in await cur.fetchall()}
+        if "uid" not in folder_columns:
+            await db.execute("ALTER TABLE folders ADD COLUMN uid TEXT")
+        if "tg_message_id" not in folder_columns:
+            await db.execute("ALTER TABLE folders ADD COLUMN tg_message_id INTEGER")
+        if "favorite" not in folder_columns:
+            await db.execute("ALTER TABLE folders ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
+        await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_uid_unique ON folders(uid) WHERE uid IS NOT NULL")
         await db.execute(
             "CREATE TABLE IF NOT EXISTS shares (token TEXT PRIMARY KEY, file_id INTEGER NOT NULL, expires_at TEXT)"
         )
@@ -76,15 +100,25 @@ async def insert_file(
     folder_id: Optional[int] = None,
     encrypted: bool = False,
     uid: Optional[str] = None,
+    favorite: bool = False,
 ) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "INSERT INTO files (folder_id, name, size, mime_type, tg_file_id, tg_thumb_file_id, tg_message_id, uploaded_at, encrypted, uid)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (folder_id, name, size, mime_type, tg_file_id, tg_thumb_file_id, tg_message_id, uploaded_at, int(encrypted), uid),
-        )
-        await db.commit()
-        return cur.lastrowid
+        try:
+            cur = await db.execute(
+                "INSERT INTO files (folder_id, name, size, mime_type, tg_file_id, tg_thumb_file_id, tg_message_id, uploaded_at, encrypted, uid, favorite)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (folder_id, name, size, mime_type, tg_file_id, tg_thumb_file_id, tg_message_id, uploaded_at, int(encrypted), uid, int(favorite)),
+            )
+            await db.commit()
+            return cur.lastrowid
+        except aiosqlite.IntegrityError:
+            if not uid:
+                raise
+            async with db.execute("SELECT id FROM files WHERE uid = ?", (uid,)) as cur:
+                row = await cur.fetchone()
+                if row is None:
+                    raise
+                return row[0]
 
 
 async def get_file(file_id: int) -> Optional[FileRecord]:
@@ -142,14 +176,43 @@ async def list_files(
             return [FileRecord(**dict(r)) for r in await cur.fetchall()]
 
 
-async def create_folder(name: str, parent_id: Optional[int], created_at: str) -> int:
+async def update_file_favorite(file_id: int, favorite: bool) -> Optional[FileRecord]:
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "INSERT INTO folders (parent_id, name, created_at) VALUES (?, ?, ?)",
-            (parent_id, name, created_at),
-        )
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("UPDATE files SET favorite = ? WHERE id = ?", (int(favorite), file_id))
+        if cur.rowcount == 0:
+            await db.commit()
+            return None
         await db.commit()
-        return cur.lastrowid
+        async with db.execute("SELECT * FROM files WHERE id = ?", (file_id,)) as get_cur:
+            row = await get_cur.fetchone()
+            return FileRecord(**dict(row)) if row else None
+
+
+async def create_folder(
+    name: str,
+    parent_id: Optional[int],
+    created_at: str,
+    uid: Optional[str] = None,
+    tg_message_id: Optional[int] = None,
+    favorite: bool = False,
+) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            cur = await db.execute(
+                "INSERT INTO folders (parent_id, name, created_at, uid, tg_message_id, favorite) VALUES (?, ?, ?, ?, ?, ?)",
+                (parent_id, name, created_at, uid, tg_message_id, int(favorite)),
+            )
+            await db.commit()
+            return cur.lastrowid
+        except aiosqlite.IntegrityError:
+            if not uid:
+                raise
+            async with db.execute("SELECT id FROM folders WHERE uid = ?", (uid,)) as cur:
+                row = await cur.fetchone()
+                if row is None:
+                    raise
+                return row[0]
 
 
 async def get_folder(folder_id: int) -> Optional[FolderRecord]:
@@ -171,6 +234,42 @@ async def get_folder_by_name(name: str, parent_id: Optional[int]) -> Optional[Fo
             params = (parent_id, name)
         async with db.execute(sql, params) as cur:
             row = await cur.fetchone()
+            return FolderRecord(**dict(row)) if row else None
+
+
+async def update_folder_metadata(folder_id: int, uid: Optional[str] = None, tg_message_id: Optional[int] = None) -> Optional[FolderRecord]:
+    sets, params = [], []
+    if uid is not None:
+        sets.append("uid = ?")
+        params.append(uid)
+    if tg_message_id is not None:
+        sets.append("tg_message_id = ?")
+        params.append(tg_message_id)
+    if not sets:
+        return await get_folder(folder_id)
+    params.append(folder_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(f"UPDATE folders SET {', '.join(sets)} WHERE id = ?", params)
+        if cur.rowcount == 0:
+            await db.commit()
+            return None
+        await db.commit()
+        async with db.execute("SELECT * FROM folders WHERE id = ?", (folder_id,)) as get_cur:
+            row = await get_cur.fetchone()
+            return FolderRecord(**dict(row)) if row else None
+
+
+async def update_folder_favorite(folder_id: int, favorite: bool) -> Optional[FolderRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("UPDATE folders SET favorite = ? WHERE id = ?", (int(favorite), folder_id))
+        if cur.rowcount == 0:
+            await db.commit()
+            return None
+        await db.commit()
+        async with db.execute("SELECT * FROM folders WHERE id = ?", (folder_id,)) as get_cur:
+            row = await get_cur.fetchone()
             return FolderRecord(**dict(row)) if row else None
 
 

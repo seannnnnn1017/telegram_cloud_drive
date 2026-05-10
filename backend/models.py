@@ -16,6 +16,7 @@ class FileRecord(BaseModel):
     uploaded_at: datetime
     encrypted: bool = False
     uid: Optional[str] = None
+    favorite: bool = False
 
 
 class FileResponse(BaseModel):
@@ -27,10 +28,15 @@ class FileResponse(BaseModel):
     has_thumbnail: bool = False
     uploaded_at: datetime
     encrypted: bool = False
+    favorite: bool = False
 
 
 class FileUpdateRequest(BaseModel):
     name: str
+
+
+class FavoriteRequest(BaseModel):
+    favorite: bool
 
 
 class StorageStats(BaseModel):
@@ -47,6 +53,9 @@ class FolderRecord(BaseModel):
     parent_id: Optional[int] = None
     name: str
     created_at: datetime
+    uid: Optional[str] = None
+    tg_message_id: Optional[int] = None
+    favorite: bool = False
 
 
 class FolderResponse(BaseModel):
@@ -54,6 +63,7 @@ class FolderResponse(BaseModel):
     parent_id: Optional[int] = None
     name: str
     created_at: datetime
+    favorite: bool = False
 
 
 class FolderCreateRequest(BaseModel):

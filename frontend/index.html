@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=7">
 </head>
 <body>
 
@@ -26,6 +26,8 @@
   <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M6 16H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
   <symbol id="i-dots" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></symbol>
   <symbol id="i-arrow-d" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-folder-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1H3z"/><path d="M3 9h18l-2 9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></symbol>
   <symbol id="i-arrow-u" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="m6 15 6-6 6 6"/></symbol>
   <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></symbol>
   <symbol id="i-sort" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M7 5v14M3 9l4-4 4 4M17 19V5M13 15l4 4 4-4"/></symbol>
@@ -167,8 +169,7 @@
 
 <!-- Upload Progress Toast -->
 <div class="upload-toast" id="upload-toast">
-  <div class="ut-name" id="ut-name">uploading...</div>
-  <div class="ut-bar"><i id="ut-prog" style="width:0%"></i></div>
+  <div class="ut-list" id="upload-progress-list"></div>
 </div>
 
 <!-- Toast Area -->
@@ -263,6 +264,8 @@
       <span class="tab" data-type="video">影片<span class="c" id="cnt-vid">0</span></span>
       <span class="tab" data-type="document">文件<span class="c" id="cnt-doc">0</span></span>
     </div>
+    <button class="ctl-btn" id="expand-all">全部展開 <span class="mono">↧</span></button>
+    <button class="ctl-btn" id="collapse-all">全部摺疊 <span class="mono">↥</span></button>
     <button class="ico-btn" id="sort-btn" title="排序"><svg width="14" height="14"><use href="#i-sort"/></svg></button>
   </section>
 
@@ -284,7 +287,7 @@
   </footer>
 </div>
 
-<script src="app.js" defer></script>
+<script src="app.js?v=7" defer></script>
 
 </body>
 </html>

@@ -94,3 +94,11 @@ async def test_storage_stats():
     stats = await get_storage_stats()
     assert stats["used_bytes"] == 3000
     assert stats["file_count"] == 2
+
+
+async def test_insert_file_dedupes_by_uid():
+    first = await insert_file("a.jpg", 100, "image/jpeg", "f1", 1, "2026-01-01T00:00:00+00:00", uid="same")
+    second = await insert_file("a.jpg", 100, "image/jpeg", "f1", 1, "2026-01-01T00:00:00+00:00", uid="same")
+    files = await list_files()
+    assert second == first
+    assert len(files) == 1

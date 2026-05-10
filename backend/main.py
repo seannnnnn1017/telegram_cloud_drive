@@ -19,6 +19,7 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .database import (
+    add_deleted_message_id,
     bulk_delete_files,
     create_share,
     delete_share,
@@ -38,11 +39,15 @@ from .database import (
     list_folder_tree_ids,
     list_folders,
     update_file_name,
+    update_file_favorite,
+    update_folder_favorite,
+    update_folder_metadata,
 )
 from .models import (
     BulkDeleteRequest,
     FileResponse,
     FileUpdateRequest,
+    FavoriteRequest,
     FolderCreateRequest,
     FolderEnsureRequest,
     FolderResponse,
@@ -59,7 +64,7 @@ from .models import (
     TelegramSettingsRequest,
     TelegramSettingsResponse,
 )
-from .sync import make_caption, start_sync_listener, sync_from_telegram
+from .sync import make_caption, make_folder_caption, start_sync_listener, sync_from_telegram
 from .telegram import TelegramClient
 
 load_dotenv()
@@ -174,7 +179,54 @@ def file_response(record) -> FileResponse:
         has_thumbnail=bool(record.tg_thumb_file_id) and not record.encrypted,
         uploaded_at=record.uploaded_at,
         encrypted=bool(record.encrypted),
+        favorite=bool(record.favorite),
     )
+
+
+def folder_response(folder) -> FolderResponse:
+    return FolderResponse(
+        id=folder.id,
+        parent_id=folder.parent_id,
+        name=folder.name,
+        created_at=folder.created_at,
+        favorite=bool(folder.favorite),
+    )
+
+
+async def ensure_folder_telegram_metadata(folder) -> None:
+    if folder is None:
+        return
+    uid = folder.uid or secrets.token_hex(8)
+    path = "/".join(await get_folder_path(folder.id)) or folder.name
+    caption = make_folder_caption(
+        name=folder.name,
+        path=path,
+        created_at=folder.created_at.isoformat() if hasattr(folder.created_at, "isoformat") else str(folder.created_at),
+        uid=uid,
+        bot_message_id=folder.tg_message_id,
+        favorite=bool(folder.favorite),
+    )
+    try:
+        tg = get_tg_client()
+        if folder.tg_message_id:
+            await tg.edit_message_text(folder.tg_message_id, caption)
+            if not folder.uid:
+                await update_folder_metadata(folder.id, uid=uid)
+            return
+        message_id = await tg.send_message(caption)
+        final_caption = make_folder_caption(
+            name=folder.name,
+            path=path,
+            created_at=folder.created_at.isoformat() if hasattr(folder.created_at, "isoformat") else str(folder.created_at),
+            uid=uid,
+            bot_message_id=message_id,
+            favorite=bool(folder.favorite),
+        )
+        await tg.edit_message_text(message_id, final_caption)
+        await update_folder_metadata(folder.id, uid=uid, tg_message_id=message_id)
+    except Exception:
+        if not folder.uid:
+            await update_folder_metadata(folder.id, uid=uid)
 
 
 async def download_record_response(record, disposition: str = "attachment") -> Response:
@@ -237,8 +289,35 @@ async def ingest_telegram_message(tg: TelegramClient, message: dict) -> bool:
     file_info = extract_message_file(message)
     if file_info is None:
         return False
-    channel_message_id = await tg.copy_message(message["chat"]["id"], message["message_id"])
     now = datetime.now(timezone.utc).isoformat()
+    file_uid = secrets.token_hex(8)
+    caption = make_caption(
+        name=file_info["name"],
+        size=file_info["size"],
+        mime_type=file_info["mime_type"],
+        encrypted=False,
+        uploaded_at=now,
+        uid=file_uid,
+        tg_file_id=file_info["file_id"],
+        tg_thumb_file_id=file_info["thumb_file_id"],
+    )
+    channel_message_id = await tg.copy_message(
+        message["chat"]["id"],
+        message["message_id"],
+        caption=caption,
+    )
+    final_caption = make_caption(
+        name=file_info["name"],
+        size=file_info["size"],
+        mime_type=file_info["mime_type"],
+        encrypted=False,
+        uploaded_at=now,
+        uid=file_uid,
+        tg_file_id=file_info["file_id"],
+        tg_thumb_file_id=file_info["thumb_file_id"],
+        bot_message_id=channel_message_id,
+    )
+    await tg.edit_message_caption(channel_message_id, final_caption)
     await insert_file(
         name=file_info["name"],
         size=file_info["size"],
@@ -248,8 +327,30 @@ async def ingest_telegram_message(tg: TelegramClient, message: dict) -> bool:
         uploaded_at=now,
         tg_thumb_file_id=file_info["thumb_file_id"],
         encrypted=False,
+        uid=file_uid,
     )
     return True
+
+
+async def file_caption_for_record(record) -> str:
+    caption_name = record.name
+    if record.folder_id is not None:
+        parts = await get_folder_path(record.folder_id)
+        if parts:
+            caption_name = "/".join(parts) + "/" + record.name
+    uploaded_at = record.uploaded_at.isoformat() if hasattr(record.uploaded_at, "isoformat") else str(record.uploaded_at)
+    return make_caption(
+        name=caption_name,
+        size=record.size,
+        mime_type=record.mime_type,
+        encrypted=bool(record.encrypted),
+        uploaded_at=uploaded_at,
+        uid=record.uid,
+        tg_file_id=record.tg_file_id,
+        tg_thumb_file_id=record.tg_thumb_file_id,
+        bot_message_id=record.tg_message_id,
+        favorite=bool(record.favorite),
+    )
 
 
 
@@ -336,7 +437,7 @@ async def api_list_files(
 @app.get("/api/folders", response_model=list[FolderResponse])
 async def api_list_folders(parent_id: Optional[int] = Query(None)):
     folders = await list_folders(parent_id)
-    return [FolderResponse(**f.model_dump()) for f in folders]
+    return [folder_response(f) for f in folders]
 
 
 @app.post("/api/folders", response_model=FolderResponse, status_code=201)
@@ -349,9 +450,11 @@ async def api_create_folder(body: FolderCreateRequest):
     if body.parent_id is not None and await get_folder(body.parent_id) is None:
         raise HTTPException(status_code=404, detail="Parent folder not found")
     now = datetime.now(timezone.utc).isoformat()
-    folder_id = await create_folder(name=name, parent_id=body.parent_id, created_at=now)
+    folder_id = await create_folder(name=name, parent_id=body.parent_id, created_at=now, uid=secrets.token_hex(8))
     folder = await get_folder(folder_id)
-    return FolderResponse(**folder.model_dump())
+    await ensure_folder_telegram_metadata(folder)
+    folder = await get_folder(folder_id)
+    return folder_response(folder)
 
 
 def validate_folder_name(name: str) -> str:
@@ -380,11 +483,13 @@ async def api_ensure_folder(body: FolderEnsureRequest):
             name = validate_folder_name(part)
             folder = await get_folder_by_name(name, parent_id)
             if folder is None:
-                folder_id = await create_folder(name=name, parent_id=parent_id, created_at=now)
+                folder_id = await create_folder(name=name, parent_id=parent_id, created_at=now, uid=secrets.token_hex(8))
+                folder = await get_folder(folder_id)
+                await ensure_folder_telegram_metadata(folder)
                 folder = await get_folder(folder_id)
             parent_id = folder.id
 
-    return FolderResponse(**folder.model_dump())
+    return folder_response(folder)
 
 
 @app.delete("/api/folders/{folder_id}", response_model=dict)
@@ -393,16 +498,31 @@ async def api_delete_folder(folder_id: int):
     if folder is None:
         raise HTTPException(status_code=404, detail="Folder not found")
     file_records = await list_files_in_folder_tree(folder_id)
+    folder_ids = await list_folder_tree_ids(folder_id)
     tg = get_tg_client()
+    remote_errors: list[str] = []
     for record in file_records:
+        await add_deleted_message_id(record.tg_message_id)
         try:
             await tg.delete_message(record.tg_message_id)
         except ValueError as exc:
-            raise HTTPException(status_code=502, detail=str(exc))
+            remote_errors.append(str(exc))
+    for folder_record in [await get_folder(fid) for fid in folder_ids]:
+        if folder_record and folder_record.tg_message_id:
+            await add_deleted_message_id(folder_record.tg_message_id)
+            try:
+                await tg.delete_message(folder_record.tg_message_id)
+            except ValueError as exc:
+                remote_errors.append(str(exc))
     deleted_files = await bulk_delete_files([record.id for record in file_records])
-    folder_ids = await list_folder_tree_ids(folder_id)
     deleted_folders = await delete_folders(folder_ids)
-    return {"ok": True, "deleted_files": deleted_files, "deleted_folders": deleted_folders}
+    return {
+        "ok": True,
+        "deleted_files": deleted_files,
+        "deleted_folders": deleted_folders,
+        "remote_failed": len(remote_errors),
+        "errors": remote_errors[:3],
+    }
 
 
 @app.get("/api/settings/telegram", response_model=TelegramSettingsResponse)
@@ -640,7 +760,33 @@ async def api_update_file(file_id: int, body: FileUpdateRequest):
     record = await update_file_name(file_id, name)
     if record is None:
         raise HTTPException(status_code=404, detail="File not found")
+    try:
+        await get_tg_client().edit_message_caption(record.tg_message_id, await file_caption_for_record(record))
+    except Exception:
+        pass
     return file_response(record)
+
+
+@app.patch("/api/files/{file_id}/favorite", response_model=FileResponse)
+async def api_update_file_favorite(file_id: int, body: FavoriteRequest):
+    record = await update_file_favorite(file_id, body.favorite)
+    if record is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        await get_tg_client().edit_message_caption(record.tg_message_id, await file_caption_for_record(record))
+    except Exception:
+        pass
+    return file_response(record)
+
+
+@app.patch("/api/folders/{folder_id}/favorite", response_model=FolderResponse)
+async def api_update_folder_favorite(folder_id: int, body: FavoriteRequest):
+    folder = await update_folder_favorite(folder_id, body.favorite)
+    if folder is None:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    await ensure_folder_telegram_metadata(folder)
+    folder = await get_folder(folder_id)
+    return folder_response(folder)
 
 
 @app.delete("/api/files/{file_id}", response_model=dict)
@@ -649,12 +795,14 @@ async def api_delete(file_id: int):
     if record is None:
         raise HTTPException(status_code=404, detail="File not found")
     tg = get_tg_client()
+    await add_deleted_message_id(record.tg_message_id)
+    remote_errors: list[str] = []
     try:
         await tg.delete_message(record.tg_message_id)
     except ValueError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        remote_errors.append(str(exc))
     await delete_file(file_id)
-    return {"ok": True}
+    return {"ok": True, "remote_failed": len(remote_errors), "errors": remote_errors[:3]}
 
 
 @app.post("/api/files/bulk-delete", response_model=dict)
@@ -662,15 +810,17 @@ async def api_bulk_delete(body: BulkDeleteRequest):
     if not body.ids:
         raise HTTPException(status_code=400, detail="No IDs provided")
     tg = get_tg_client()
+    remote_errors: list[str] = []
     for fid in body.ids:
         record = await get_file(fid)
         if record:
+            await add_deleted_message_id(record.tg_message_id)
             try:
                 await tg.delete_message(record.tg_message_id)
             except ValueError as exc:
-                raise HTTPException(status_code=502, detail=str(exc))
+                remote_errors.append(str(exc))
     deleted = await bulk_delete_files(body.ids)
-    return {"deleted": deleted}
+    return {"deleted": deleted, "remote_failed": len(remote_errors), "errors": remote_errors[:3]}
 
 
 @app.post("/api/files/bulk-download")

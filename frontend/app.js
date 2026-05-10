@@ -12,6 +12,15 @@ const state = {
   q: '',
   view: localStorage.getItem('vault-view-mode') || 'list',
   activeTransfers: 0,
+  expandedFolders: new Set(),
+  folderChildren: new Map(),
+  visibleFiles: [],
+  visibleFolders: [],
+  previewingIds: new Set(),
+  previewRequestId: 0,
+  previewObjectUrl: null,
+  previewProgressId: null,
+  deleteSelectedBusy: false,
 };
 
 function beginTransfer() {
@@ -31,20 +40,20 @@ function esc(str) {
 }
 
 function fmtSize(bytes) {
-  if (bytes < 1024) return `${bytes} <span class="unit">B</span>`;
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} <span class="unit">KB</span>`;
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(2)} <span class="unit">MB</span>`;
-  return `${(bytes / 1024 ** 3).toFixed(2)} <span class="unit">GB</span>`;
+  if (bytes < 1024) return `${bytes}<span class="unit">B</span>`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)}<span class="unit">KB</span>`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(2)}<span class="unit">MB</span>`;
+  return `${(bytes / 1024 ** 3).toFixed(2)}<span class="unit">GB</span>`;
 }
 
 function fmtDate(iso) {
   const d = new Date(iso), now = new Date();
   const diff = (now - d) / 1000;
-  if (diff < 60) return `${Math.floor(diff)} 秒前`;
-  if (diff < 3600) return `${Math.floor(diff / 60)} 分鐘前`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} 小時前`;
+  if (diff < 60) return `${Math.floor(diff)}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   if (diff < 172800) return '昨天';
-  return d.toLocaleDateString('zh-TW');
+  return d.toLocaleDateString('zh-TW', { month: 'short', day: 'numeric' });
 }
 
 function mimeIcon(mime) {
@@ -59,6 +68,13 @@ function mimeLabel(mime) {
   if (!mime) return '檔案';
   const parts = mime.split('/');
   return (parts[1] || parts[0]).toUpperCase().replace('OCTET-STREAM', '檔案');
+}
+
+function indentRail(depth) {
+  if (!depth) return '';
+  let html = '<div class="indent-rail">';
+  for (let i = 0; i < depth; i++) html += '<div class="rail"></div>';
+  return html + '</div>';
 }
 
 function isPreviewable(mime) {
@@ -76,6 +92,61 @@ function toast(msg, isErr = false) {
   el.textContent = msg;
   document.getElementById('toast-area').append(el);
   setTimeout(() => el.remove(), 3000);
+}
+
+const uploadProgress = new Map();
+let uploadProgressSeq = 0;
+
+function updateUploadToastVisibility() {
+  const toastEl = document.getElementById('upload-toast');
+  toastEl.classList.toggle('show', uploadProgress.size > 0);
+}
+
+function createUploadProgress(name) {
+  const id = `upload-${++uploadProgressSeq}`;
+  const toastEl = document.getElementById('upload-toast');
+  let list = document.getElementById('upload-progress-list');
+  if (!list) {
+    list = document.createElement('div');
+    list.className = 'ut-list';
+    list.id = 'upload-progress-list';
+    toastEl.append(list);
+  }
+  const item = document.createElement('div');
+  item.className = 'ut-item';
+  item.dataset.uploadId = id;
+  item.innerHTML = `
+    <div class="ut-meta">
+      <div class="ut-name"></div>
+      <div class="ut-pct">0%</div>
+    </div>
+    <div class="ut-bar"><i style="width:0%"></i></div>
+  `;
+  const nameEl = item.querySelector('.ut-name');
+  if (nameEl) nameEl.textContent = name;
+  list.append(item);
+  uploadProgress.set(id, item);
+  updateUploadToastVisibility();
+  return id;
+}
+
+function setUploadProgress(id, percent) {
+  const item = uploadProgress.get(id);
+  if (!item) return;
+  const safePercent = Math.max(0, Math.min(100, Math.round(percent)));
+  item.querySelector('.ut-bar i').style.width = `${safePercent}%`;
+  item.querySelector('.ut-pct').textContent = `${safePercent}%`;
+}
+
+function finishUploadProgress(id) {
+  const item = uploadProgress.get(id);
+  if (!item) return;
+  setUploadProgress(id, 100);
+  uploadProgress.delete(id);
+  setTimeout(() => {
+    item.remove();
+    updateUploadToastVisibility();
+  }, 350);
 }
 
 let ctxOpen = false;
@@ -110,30 +181,91 @@ function closeCtx() {
 document.addEventListener('click', () => { if (ctxOpen) closeCtx(); });
 
 async function showPreview(file) {
+  if (state.previewProgressId || state.previewingIds.has(file.id)) return;
+  state.previewingIds.add(file.id);
+  const requestId = ++state.previewRequestId;
   const bg = document.getElementById('modal-bg');
   const content = document.getElementById('modal-content');
+  const progressId = createUploadProgress(`Opening ${file.name}`);
+  state.previewProgressId = progressId;
   let inner = '';
   let src = `/api/files/${file.id}/preview`;
-  if (file.encrypted) {
-    try {
-      src = await decryptedObjectUrl(file);
-    } catch (err) {
-      toast(err.message || 'Decrypt failed', true);
-      return;
-    }
-  }
-  if (file.mime_type && file.mime_type.startsWith('image/')) {
-    inner = `<img src="${src}" alt="${esc(file.name)}">`;
-  } else if (file.mime_type && file.mime_type.startsWith('video/')) {
-    inner = `<video src="${src}" controls preload="metadata" style="max-width:85vw;max-height:85vh;display:block"></video>`;
-  } else if (file.mime_type === 'application/pdf') {
-    inner = `<iframe src="${src}" title="${esc(file.name)}"></iframe>`;
-  }
-  content.innerHTML = `<button class="modal-close" id="modal-close"><svg width="12" height="12"><use href="#i-close"/></svg></button>${inner}`;
+  setUploadProgress(progressId, 8);
   bg.classList.add('show');
+  content.setAttribute('aria-busy', 'true');
+  content.innerHTML = `
+    <button class="modal-close" id="modal-close"><svg width="12" height="12"><use href="#i-close"/></svg></button>
+    <div class="preview-loading">
+      <div class="preview-label">Opening preview...</div>
+      <div class="preview-progress"><i></i></div>
+    </div>
+  `;
   document.getElementById('modal-close').onclick = closeModal;
+  try {
+    if (file.encrypted) {
+      src = await decryptedObjectUrl(file);
+      if (state.previewObjectUrl) URL.revokeObjectURL(state.previewObjectUrl);
+      state.previewObjectUrl = src;
+    }
+    setUploadProgress(progressId, 55);
+    if (requestId !== state.previewRequestId) return;
+    if (file.mime_type && file.mime_type.startsWith('image/')) {
+      inner = `<img src="${src}" alt="${esc(file.name)}">`;
+    } else if (file.mime_type && file.mime_type.startsWith('video/')) {
+      inner = `<video src="${src}" controls preload="metadata" style="max-width:85vw;max-height:85vh;display:block"></video>`;
+    } else if (file.mime_type === 'application/pdf') {
+      inner = `<iframe src="${src}" title="${esc(file.name)}"></iframe>`;
+    }
+    content.innerHTML = `
+      <button class="modal-close" id="modal-close"><svg width="12" height="12"><use href="#i-close"/></svg></button>
+      <div class="preview-progress preview-progress-top"><i></i></div>
+      ${inner}
+    `;
+    document.getElementById('modal-close').onclick = closeModal;
+    const media = content.querySelector('img,video,iframe');
+    const markReady = () => {
+      if (requestId !== state.previewRequestId) return;
+      content.removeAttribute('aria-busy');
+      content.querySelector('.preview-progress-top')?.remove();
+      finishUploadProgress(progressId);
+      if (state.previewProgressId === progressId) state.previewProgressId = null;
+    };
+    if (media) {
+      media.addEventListener('load', markReady, { once: true });
+      media.addEventListener('loadedmetadata', markReady, { once: true });
+      media.addEventListener('error', () => {
+        markReady();
+        toast('Preview failed', true);
+      }, { once: true });
+      setTimeout(markReady, file.mime_type === 'application/pdf' ? 1200 : 5000);
+    } else {
+      markReady();
+    }
+  } catch (err) {
+    if (requestId === state.previewRequestId) {
+      closeModal();
+      toast(err.message || 'Preview failed', true);
+      finishUploadProgress(progressId);
+      if (state.previewProgressId === progressId) state.previewProgressId = null;
+    }
+  } finally {
+    state.previewingIds.delete(file.id);
+  }
 }
-function closeModal() { document.getElementById('modal-bg').classList.remove('show'); }
+function closeModal() {
+  state.previewRequestId += 1;
+  document.getElementById('modal-bg').classList.remove('show');
+  const content = document.getElementById('modal-content');
+  content.removeAttribute('aria-busy');
+  if (state.previewObjectUrl) {
+    URL.revokeObjectURL(state.previewObjectUrl);
+    state.previewObjectUrl = null;
+  }
+  if (state.previewProgressId) {
+    finishUploadProgress(state.previewProgressId);
+    state.previewProgressId = null;
+  }
+}
 document.getElementById('modal-bg').addEventListener('click', (e) => {
   if (e.target === e.currentTarget) closeModal();
 });
@@ -157,9 +289,17 @@ async function doDownload(file) {
 }
 
 async function doDelete(id) {
-  if (!confirm('確定要刪除這個檔案嗎？')) return;
+  if (!confirm('Delete this file?')) return;
+  const progressId = createUploadProgress('Deleting file');
+  setUploadProgress(progressId, 20);
   const r = await fetch(`/api/files/${id}`, { method: 'DELETE' });
-  if (r.ok) { toast('已刪除'); loadFiles(); }
+  finishUploadProgress(progressId);
+  if (r.ok) {
+    const data = await r.json();
+    toast(data.remote_failed ? 'Deleted locally; Telegram delete needs attention' : 'Deleted');
+    loadFiles();
+    loadStorage();
+  }
   else { toast('刪除失敗', true); }
 }
 
@@ -210,6 +350,7 @@ function goBack() {
   state.folderId = state.folderStack.length ? state.folderStack[state.folderStack.length - 1].id : null;
   state.selected.clear();
   state.selectedFolders.clear();
+  state.expandedFolders.clear();
   loadFiles();
 }
 
@@ -225,6 +366,8 @@ document.getElementById('pathbar').addEventListener('click', (e) => {
     state.folderId = state.folderStack[idx].id;
   }
   state.selected.clear();
+  state.selectedFolders.clear();
+  state.expandedFolders.clear();
   loadFiles();
 });
 
@@ -312,10 +455,7 @@ async function uploadFile(file) {
   const MAX = 20 * 1024 * 1024;
   if (file.size > MAX) { toast(`${file.name} 超過 20 MB 限制`, true); return; }
 
-  const toastEl = document.getElementById('upload-toast');
-  document.getElementById('ut-name').textContent = file.name;
-  document.getElementById('ut-prog').style.width = '0%';
-  toastEl.classList.add('show');
+  const progressId = createUploadProgress(file.name);
 
   const xhr = new XMLHttpRequest();
   const form = new FormData();
@@ -325,11 +465,11 @@ async function uploadFile(file) {
   await new Promise((resolve) => {
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable) {
-        document.getElementById('ut-prog').style.width = `${(e.loaded / e.total * 100).toFixed(0)}%`;
+        setUploadProgress(progressId, e.loaded / e.total * 100);
       }
     });
     xhr.onload = () => {
-      toastEl.classList.remove('show');
+      finishUploadProgress(progressId);
       if (xhr.status === 201) { toast(`${file.name} 上傳成功`); loadFiles(); loadStorage(); }
       else {
         try { toast(JSON.parse(xhr.responseText).detail || '上傳失敗', true); }
@@ -337,7 +477,7 @@ async function uploadFile(file) {
       }
       resolve();
     };
-    xhr.onerror = () => { toastEl.classList.remove('show'); toast('網路錯誤', true); resolve(); };
+    xhr.onerror = () => { finishUploadProgress(progressId); toast('網路錯誤', true); resolve(); };
     xhr.open('POST', '/api/upload');
     xhr.send(form);
   });
@@ -486,10 +626,7 @@ async function uploadFileTracked(file, targetFolderId = state.folderId) {
     return false;
   }
 
-  const toastEl = document.getElementById('upload-toast');
-  document.getElementById('ut-name').textContent = file.name;
-  document.getElementById('ut-prog').style.width = '0%';
-  toastEl.classList.add('show');
+  const progressId = createUploadProgress(file.name);
 
   const xhr = new XMLHttpRequest();
   const form = new FormData();
@@ -501,14 +638,16 @@ async function uploadFileTracked(file, targetFolderId = state.folderId) {
   return await new Promise((resolve) => {
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable) {
-        document.getElementById('ut-prog').style.width = `${(e.loaded / e.total * 100).toFixed(0)}%`;
+        setUploadProgress(progressId, e.loaded / e.total * 100);
       }
     });
     xhr.onload = () => {
       endTransfer();
-      toastEl.classList.remove('show');
+      finishUploadProgress(progressId);
       if (xhr.status === 201) {
         toast(`${file.name} uploaded`);
+        loadFiles();
+        loadStorage();
         resolve(true);
       } else {
         try { toast(JSON.parse(xhr.responseText).detail || 'Upload failed', true); }
@@ -516,7 +655,7 @@ async function uploadFileTracked(file, targetFolderId = state.folderId) {
         resolve(false);
       }
     };
-    xhr.onerror = () => { endTransfer(); toastEl.classList.remove('show'); toast('Network error', true); resolve(false); };
+    xhr.onerror = () => { endTransfer(); finishUploadProgress(progressId); toast('Network error', true); resolve(false); };
     xhr.open('POST', '/api/upload');
     xhr.send(form);
   });
@@ -546,8 +685,6 @@ async function uploadFilesTracked(files) {
   await Promise.all(
     Array.from({ length: Math.min(concurrency, queue.length) }, () => worker())
   );
-  loadFiles();
-  loadStorage();
   if (queue.length > 1) {
     toast(`Upload finished: ${ok} ok, ${failed} failed`, failed > 0);
   }
@@ -894,13 +1031,16 @@ document.getElementById('search-input').addEventListener('input', (e) => {
 function fileItemMarkup(f) {
   const icon = mimeIcon(f.mime_type);
   const sel = state.selected.has(f.id);
+  const depth = f.__depth || 0;
   if (state.view === 'list') {
     return `
-    <div class="row file-item${sel ? ' selected' : ''}" data-id="${f.id}">
+    <div class="row file-row file-item${sel ? ' selected' : ''}" data-id="${f.id}" data-depth="${depth}" style="--depth:${depth}">
       <input type="checkbox" class="cb" data-cb="${f.id}" ${sel ? 'checked' : ''}>
       <div class="name-cell">
+        ${indentRail(depth)}
+        <span class="twisty spacer"></span>
         <div class="ic ${icon}"><svg width="14" height="14"><use href="#i-${icon}"/></svg></div>
-        <div>
+        <div class="label">
           <div class="fname">${esc(f.name)}</div>
           <span class="fmeta">${mimeLabel(f.mime_type)}</span>
         </div>
@@ -908,7 +1048,7 @@ function fileItemMarkup(f) {
       <div class="col dim">${mimeLabel(f.mime_type)}</div>
       <div class="col">${fmtDate(f.uploaded_at)}</div>
       <div class="col size">${fmtSize(f.size)}</div>
-      <span style="display:flex;gap:2px;align-items:center;justify-content:flex-end">${favBtnHtml(f,'file')}<button class="more-btn" data-more="${f.id}"><svg width="14" height="14"><use href="#i-dots"/></svg></button></span>
+      <span class="row-actions">${favBtnHtml(f,'file')}<button class="more-btn" data-more="${f.id}"><svg width="14" height="14"><use href="#i-dots"/></svg></button></span>
     </div>`;
   }
 
@@ -930,21 +1070,31 @@ function fileItemMarkup(f) {
 
 function folderItemMarkup(folder) {
   const sel = state.selectedFolders.has(folder.id);
+  const depth = folder.__depth || 0;
+  const expanded = state.expandedFolders.has(folder.id);
   if (state.view === 'list') {
+    const children = state.folderChildren.get(folder.id);
+    const count = children ? children.files.length + children.folders.length : (folder.item_count || folder.count || 0);
     return `
-    <div class="row folder-row folder-item${sel ? ' selected' : ''}" data-folder-id="${folder.id}">
+    <div class="row folder-row folder-item${sel ? ' selected' : ''}${expanded ? ' is-open' : ''}" data-folder-id="${folder.id}" data-depth="${depth}" style="--depth:${depth}">
       <input type="checkbox" class="cb" data-cb-folder="${folder.id}" ${sel ? 'checked' : ''}>
       <div class="name-cell">
-        <div class="ic folder"><svg width="14" height="14"><use href="#i-folder"/></svg></div>
-        <div>
+        ${indentRail(depth)}
+        <button class="twisty ${expanded ? 'open' : ''}" data-twisty="${folder.id}" aria-label="toggle">
+          <svg width="11" height="11"><use href="#i-chev"/></svg>
+        </button>
+        <div class="ic folder">
+          <svg width="14" height="14"><use href="#i-${expanded ? 'folder-open' : 'folder'}"/></svg>
+        </div>
+        <div class="label">
           <div class="fname">${esc(folder.name)}</div>
-          <span class="fmeta">Folder</span>
+          <span class="fmeta">Folder · ${expanded ? 'expanded' : 'collapsed'}</span>
         </div>
       </div>
       <div class="col dim">FOLDER</div>
       <div class="col">${fmtDate(folder.created_at)}</div>
-      <div class="col size">--</div>
-      <span style="display:flex;gap:2px;align-items:center;justify-content:flex-end">${favBtnHtml(folder,'folder')}<button class="more-btn" data-more-folder="${folder.id}"><svg width="14" height="14"><use href="#i-dots"/></svg></button></span>
+      <div class="col size dim">—</div>
+      <span class="row-actions">${favBtnHtml(folder,'folder')}<button class="more-btn" data-more-folder="${folder.id}"><svg width="14" height="14"><use href="#i-dots"/></svg></button></span>
     </div>`;
   }
   return `
@@ -962,11 +1112,64 @@ function folderItemMarkup(folder) {
     </div>`;
 }
 
+async function loadFolderChildren(folderId) {
+  if (state.folderChildren.has(folderId)) return state.folderChildren.get(folderId);
+  const [filesRes, foldersRes] = await Promise.all([
+    fetch(`/api/files?folder_id=${encodeURIComponent(folderId)}&sort=${encodeURIComponent(state.sort)}&order=${encodeURIComponent(state.order)}`),
+    fetch(`/api/folders?parent_id=${encodeURIComponent(folderId)}`),
+  ]);
+  const children = {
+    files: await filesRes.json(),
+    folders: await foldersRes.json(),
+  };
+  state.folderChildren.set(folderId, children);
+  return children;
+}
+
+async function toggleFolderExpanded(folder) {
+  if (state.expandedFolders.has(folder.id)) {
+    state.expandedFolders.delete(folder.id);
+    renderFiles();
+    return;
+  }
+  try {
+    await loadFolderChildren(folder.id);
+    state.expandedFolders.add(folder.id);
+    renderFiles();
+  } catch {
+    toast('Folder expand failed', true);
+  }
+}
+
+function listFolderEntries(folder, depth = 0) {
+  const folderEntry = { ...folder, __depth: depth };
+  const entries = [{ type: 'folder', item: folderEntry }];
+  if (!state.expandedFolders.has(folder.id)) return entries;
+
+  const children = state.folderChildren.get(folder.id);
+  if (!children) return entries;
+  children.folders.forEach(child => {
+    entries.push(...listFolderEntries(child, depth + 1));
+  });
+  children.files.forEach(file => {
+    entries.push({ type: 'file', item: { ...file, __depth: depth + 1 } });
+  });
+  return entries;
+}
+
+function listEntries(folders, files) {
+  const entries = [];
+  folders.forEach(folder => entries.push(...listFolderEntries(folder, 0)));
+  files.forEach(file => entries.push({ type: 'file', item: { ...file, __depth: 0 } }));
+  return entries;
+}
+
 function attachFolderHandlers(list) {
   list.querySelectorAll('[data-folder-id]').forEach(item => {
     const id = parseInt(item.dataset.folderId);
-    const folder = state.folders.find(f => f.id === id);
+    const folder = state.visibleFolders.find(f => f.id === id) || state.folders.find(f => f.id === id);
     if (!folder) return;
+    let clickTimer = null;
 
     const cb = item.querySelector('[data-cb-folder]');
     if (cb) {
@@ -986,47 +1189,100 @@ function attachFolderHandlers(list) {
       });
     }
 
+    const twistyBtn = item.querySelector('[data-twisty]');
+    if (twistyBtn) {
+      twistyBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        clearTimeout(clickTimer);
+        clickTimer = null;
+        toggleFolderExpanded(folder);
+      });
+    }
+
     item.addEventListener('click', (e) => {
       if (suppressNextRowClick) return;
-      if (e.target.closest('[data-cb-folder]') || e.target.closest('[data-more-folder]')) return;
+      if (e.target.closest('[data-cb-folder]') || e.target.closest('[data-more-folder]') || e.target.closest('[data-twisty]')) return;
       const totalSel = state.selected.size + state.selectedFolders.size;
       if (totalSel > 0) {
         const nowSel = !state.selectedFolders.has(id);
         setFolderSelection(item, id, nowSel);
         updateBulkBar();
       } else {
-        state.folderId = folder.id;
-        state.folderStack.push({ id: folder.id, name: folder.name });
-        state.selected.clear();
-        state.selectedFolders.clear();
-        loadFiles();
+        if (state.view !== 'list') {
+          enterFolder(folder);
+          return;
+        }
+        clearTimeout(clickTimer);
+        clickTimer = null;
+        toggleFolderExpanded(folder);
       }
+    });
+
+    item.addEventListener('dblclick', (e) => {
+      if (e.target.closest('[data-cb-folder]') || e.target.closest('[data-more-folder]') || e.target.closest('[data-twisty]')) return;
+      clearTimeout(clickTimer);
+      clickTimer = null;
+      enterFolder(folder);
     });
   });
 }
+
+async function expandAllFolders(folders) {
+  for (const folder of folders) {
+    if (!state.expandedFolders.has(folder.id)) {
+      try { await loadFolderChildren(folder.id); } catch { continue; }
+      state.expandedFolders.add(folder.id);
+    }
+    const children = state.folderChildren.get(folder.id);
+    if (children && children.folders.length) await expandAllFolders(children.folders);
+  }
+}
+
+document.getElementById('expand-all').onclick = async () => {
+  const btn = document.getElementById('expand-all');
+  btn.disabled = true;
+  try { await expandAllFolders(state.folders); renderFiles(); }
+  finally { btn.disabled = false; }
+};
+
+document.getElementById('collapse-all').onclick = () => {
+  state.expandedFolders.clear();
+  renderFiles();
+};
 
 function renderFiles() {
   const list = document.getElementById('file-list');
   let displayFiles = state.files;
   let displayFolders = state.folders;
   if (state.type === 'favorite') {
-    displayFiles = state.files.filter(f => state.favs.has(`file:${f.id}`));
-    displayFolders = state.folders.filter(d => state.favs.has(`folder:${d.id}`));
+    displayFiles = state.files.filter(f => f.favorite);
+    displayFolders = state.folders.filter(d => d.favorite);
   }
   if (displayFiles.length === 0 && displayFolders.length === 0) {
     list.className = '';
-    list.innerHTML = '<div class="empty">沒有檔案</div>';
+    list.innerHTML = '<div class="empty-state">沒有檔案</div>';
     updateBulkBar();
     renderPathbar();
     return;
   }
   list.className = state.view === 'list' ? '' : `file-grid ${state.view === 'preview' ? 'preview-grid' : ''}`;
-  list.innerHTML = displayFolders.map(folderItemMarkup).join('') + displayFiles.map(fileItemMarkup).join('');
+  if (state.view === 'list') {
+    const entries = listEntries(displayFolders, displayFiles);
+    state.visibleFolders = entries.filter(entry => entry.type === 'folder').map(entry => entry.item);
+    state.visibleFiles = entries.filter(entry => entry.type === 'file').map(entry => entry.item);
+    list.innerHTML = entries.map(entry => (
+      entry.type === 'folder' ? folderItemMarkup(entry.item) : fileItemMarkup(entry.item)
+    )).join('');
+  } else {
+    state.visibleFolders = displayFolders;
+    state.visibleFiles = displayFiles;
+    list.innerHTML = displayFolders.map(folderItemMarkup).join('') + displayFiles.map(fileItemMarkup).join('');
+  }
   attachFolderHandlers(list);
 
   list.querySelectorAll('.file-item').forEach(row => {
     const id = parseInt(row.dataset.id);
-    const file = displayFiles.find(f => f.id === id);
+    const file = state.visibleFiles.find(f => f.id === id);
 
     row.querySelector('[data-cb]').addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1069,7 +1325,7 @@ function updateCounts(files) {
   document.getElementById('cnt-vid').textContent = files.filter(f => f.mime_type?.startsWith('video/')).length;
   document.getElementById('cnt-doc').textContent = files.filter(f => f.mime_type?.startsWith('application/')).length;
   const favEl = document.getElementById('cnt-fav');
-  if (favEl) favEl.textContent = files.filter(f => state.favs.has(`file:${f.id}`)).length + state.folders.filter(d => state.favs.has(`folder:${d.id}`)).length;
+  if (favEl) favEl.textContent = files.filter(f => f.favorite).length + state.folders.filter(d => d.favorite).length;
 }
 
 async function loadStorage() {
@@ -1163,6 +1419,8 @@ function enterFolder(folder) {
   state.folderId = folder.id;
   state.folderStack.push({ id: folder.id, name: folder.name });
   state.selected.clear();
+  state.selectedFolders.clear();
+  state.expandedFolders.clear();
   loadFiles();
 }
 
@@ -1182,38 +1440,84 @@ async function promptCreateFolder(parentId = state.folderId) {
 }
 
 async function deleteSelectedFiles() {
+  if (state.deleteSelectedBusy) return;
   const fileIds = Array.from(state.selected);
   const folderIds = Array.from(state.selectedFolders);
   const total = fileIds.length + folderIds.length;
   if (!total) return;
   if (!confirm(`Delete ${total} selected item(s)?`)) return;
+  state.deleteSelectedBusy = true;
+  const deleteBtn = document.getElementById('bulk-del');
+  const downloadBtn = document.getElementById('bulk-download');
+  const cancelBtn = document.getElementById('bulk-cancel');
+  [deleteBtn, downloadBtn, cancelBtn].forEach(btn => { if (btn) btn.disabled = true; });
+  const progressId = createUploadProgress(`Deleting ${total} items`);
+  let done = 0;
+  setUploadProgress(progressId, 0);
   let deleted = 0;
-  if (fileIds.length) {
-    const r = await fetch('/api/files/bulk-delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: fileIds }),
-    });
-    if (r.ok) { const d = await r.json(); deleted += d.deleted || 0; }
+  let remoteFailed = 0;
+  let failed = 0;
+  try {
+    if (fileIds.length) {
+      const r = await fetch('/api/files/bulk-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: fileIds }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        deleted += d.deleted || 0;
+        remoteFailed += d.remote_failed || 0;
+      } else {
+        failed += fileIds.length;
+        try { toast((await r.json()).detail || 'Bulk delete failed', true); }
+        catch { toast('Bulk delete failed', true); }
+      }
+      done += fileIds.length;
+      setUploadProgress(progressId, done / total * 100);
+    }
+    for (const id of folderIds) {
+      const r = await fetch(`/api/folders/${id}`, { method: 'DELETE' });
+      if (r.ok) {
+        const d = await r.json();
+        deleted += (d.deleted_files || 0) + (d.deleted_folders || 0);
+        remoteFailed += d.remote_failed || 0;
+      } else {
+        failed += 1;
+        try { toast((await r.json()).detail || 'Folder delete failed', true); }
+        catch { toast('Folder delete failed', true); }
+      }
+      done++;
+      setUploadProgress(progressId, done / total * 100);
+    }
+    if (remoteFailed) toast(`Deleted ${deleted} item(s) locally; ${remoteFailed} Telegram delete(s) need attention`, true);
+    else toast(`Deleted ${deleted} item(s)${failed ? `, ${failed} failed` : ''}`);
+    state.selected.clear();
+    state.selectedFolders.clear();
+    await loadFiles();
+    loadStorage();
+  } finally {
+    finishUploadProgress(progressId);
+    state.deleteSelectedBusy = false;
+    [deleteBtn, downloadBtn, cancelBtn].forEach(btn => { if (btn) btn.disabled = false; });
   }
-  for (const id of folderIds) {
-    const r = await fetch(`/api/folders/${id}`, { method: 'DELETE' });
-    if (r.ok) deleted++;
-  }
-  toast(`Deleted ${deleted} item(s)`);
-  state.selected.clear();
-  state.selectedFolders.clear();
-  loadFiles();
 }
+
+document.getElementById('bulk-del').onclick = deleteSelectedFiles;
 
 async function deleteFolder(folder) {
   if (!folder) return;
   if (!confirm(`Delete folder "${folder.name}" and all contents?`)) return;
+  const progressId = createUploadProgress(`Deleting ${folder.name}`);
+  setUploadProgress(progressId, 20);
   const r = await fetch(`/api/folders/${folder.id}`, { method: 'DELETE' });
+  finishUploadProgress(progressId);
   if (r.ok) {
     const data = await r.json();
-    toast(`Deleted ${data.deleted_folders} folder(s), ${data.deleted_files} file(s)`);
+    const msg = `Deleted ${data.deleted_folders} folder(s), ${data.deleted_files} file(s)`;
+    toast(data.remote_failed ? `${msg}; ${data.remote_failed} Telegram delete(s) need attention` : msg, !!data.remote_failed);
     state.selected.clear();
+    state.selectedFolders.clear();
     if (state.folderId === folder.id || state.folderStack.some(f => f.id === folder.id)) {
       state.folderId = null;
       state.folderStack = [];
@@ -1341,7 +1645,7 @@ document.getElementById('file-list').addEventListener('contextmenu', (e) => {
   const folderEl = e.target.closest('[data-folder-id]');
   if (fileEl) {
     const id = parseInt(fileEl.dataset.id);
-    const file = state.files.find(f => f.id === id);
+    const file = state.visibleFiles.find(f => f.id === id) || state.files.find(f => f.id === id);
     if (!file) return;
     const totalSel = state.selected.size + state.selectedFolders.size;
     if (totalSel > 0 && state.selected.has(id)) showCtx(e, { kind: 'selection' });
@@ -1350,7 +1654,7 @@ document.getElementById('file-list').addEventListener('contextmenu', (e) => {
   }
   if (folderEl) {
     const id = parseInt(folderEl.dataset.folderId);
-    const folder = state.folders.find(f => f.id === id);
+    const folder = state.visibleFolders.find(f => f.id === id) || state.folders.find(f => f.id === id);
     if (!folder) return;
     const totalSel = state.selected.size + state.selectedFolders.size;
     if (totalSel > 0 && state.selectedFolders.has(id)) showCtx(e, { kind: 'selection' });
@@ -1365,32 +1669,42 @@ function openCtx(e, file) {
 }
 
 // ===== Favorites =====
-const FAV_KEY = 'vault-favorites';
-function loadFavs() { try { return new Set(JSON.parse(localStorage.getItem(FAV_KEY) || '[]')); } catch { return new Set(); } }
-function saveFavs(set) { localStorage.setItem(FAV_KEY, JSON.stringify([...set])); }
-state.favs = loadFavs();
-
-function favKey(item, kind) { return `${kind}:${item.id}`; }
-
-function toggleFav(item, kind, btn) {
-  const k = favKey(item, kind);
-  const on = !state.favs.has(k);
-  if (on) state.favs.add(k); else state.favs.delete(k);
-  saveFavs(state.favs);
+async function toggleFav(item, kind, btn) {
+  const on = !item.favorite;
+  const url = kind === 'folder' ? `/api/folders/${item.id}/favorite` : `/api/files/${item.id}/favorite`;
   if (btn) {
+    btn.disabled = true;
     btn.classList.toggle('is-fav', on);
     btn.classList.remove('pop');
     void btn.offsetWidth;
     if (on) btn.classList.add('pop');
     setTimeout(() => btn.classList.remove('pop'), 600);
   }
+  try {
+    const r = await fetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ favorite: on }),
+    });
+    if (!r.ok) throw new Error('Favorite update failed');
+    const updated = await r.json();
+    Object.assign(item, updated);
+    await loadFiles();
+    toast(on ? 'Added to favorites' : 'Removed from favorites');
+  } catch {
+    if (btn) btn.classList.toggle('is-fav', !on);
+    toast('Favorite update failed', true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+  return;
   if (state.type === 'favorite') renderFiles();
   updateCounts(state.allFiles.length ? state.allFiles : state.files);
   toast(on ? '加入最愛' : '已移除');
 }
 
 function favBtnHtml(item, kind) {
-  const on = state.favs && state.favs.has(favKey(item, kind));
+  const on = item.favorite;
   return `<button class="fav-btn${on ? ' is-fav' : ''}" data-fav="${kind}:${item.id}" title="加入最愛"><svg width="14" height="14"><use href="#i-star"/></svg><span class="fav-spark"><i></i><i></i><i></i><i></i><i></i><i></i></span></button>`;
 }
 
@@ -1400,7 +1714,9 @@ document.addEventListener('click', (e) => {
   e.stopPropagation();
   const [kind, idStr] = btn.dataset.fav.split(':');
   const id = parseInt(idStr);
-  const item = kind === 'folder' ? state.folders.find(f => f.id === id) : state.files.find(f => f.id === id);
+  const item = kind === 'folder'
+    ? (state.visibleFolders.find(f => f.id === id) || state.folders.find(f => f.id === id))
+    : (state.visibleFiles.find(f => f.id === id) || state.files.find(f => f.id === id));
   if (item) toggleFav(item, kind, btn);
 }, true);
 
@@ -1619,7 +1935,7 @@ async function requestServerShutdown({ clearLocalKeys = false } = {}) {
   }
   try {
     await fetch('/api/server/shutdown', { method: 'POST' });
-    document.body.innerHTML = `<div class="empty" style="min-height:100vh;display:grid;place-items:center">${clearLocalKeys ? '已登出並關閉伺服器' : '正在關閉伺服器'}</div>`;
+    document.body.innerHTML = `<div class="empty-state" style="min-height:100vh;display:grid;place-items:center">${clearLocalKeys ? '已登出並關閉伺服器' : '正在關閉伺服器'}</div>`;
   } catch {
     toast('伺服器關閉失敗', true);
   }

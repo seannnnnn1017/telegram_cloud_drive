@@ -15,6 +15,7 @@ from .database import (
     list_all_uids,
     list_deleted_message_ids,
     remove_deleted_message_ids,
+    update_folder_favorite,
 )
 
 CAPTION_VERSION = 1
@@ -30,6 +31,7 @@ def make_caption(
     tg_file_id: Optional[str] = None,
     tg_thumb_file_id: Optional[str] = None,
     bot_message_id: Optional[int] = None,
+    favorite: bool = False,
 ) -> str:
     data: dict = {
         "v": CAPTION_VERSION,
@@ -38,6 +40,7 @@ def make_caption(
         "m": mime_type or "",
         "e": int(encrypted),
         "t": uploaded_at,
+        "fav": int(favorite),
     }
     if uid:
         data["id"] = uid
@@ -45,6 +48,28 @@ def make_caption(
         data["f"] = tg_file_id
     if tg_thumb_file_id:
         data["th"] = tg_thumb_file_id
+    if bot_message_id is not None:
+        data["mid"] = bot_message_id
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def make_folder_caption(
+    name: str,
+    path: str,
+    created_at: str,
+    uid: str,
+    bot_message_id: Optional[int] = None,
+    favorite: bool = False,
+) -> str:
+    data: dict = {
+        "v": CAPTION_VERSION,
+        "k": "folder",
+        "n": name,
+        "p": path,
+        "t": created_at,
+        "id": uid,
+        "fav": int(favorite),
+    }
     if bot_message_id is not None:
         data["mid"] = bot_message_id
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
@@ -59,6 +84,8 @@ def parse_caption(text: str) -> Optional[dict]:
         return None
     if data.get("v") != CAPTION_VERSION:
         return None
+    if data.get("k", "file") != "file":
+        return None
     # "f" (file_id) and "id" (uid) are optional
     if not all(k in data for k in ("n", "s", "t")):
         return None
@@ -72,6 +99,28 @@ def parse_caption(text: str) -> Optional[dict]:
         "encrypted": bool(data.get("e", 0)),
         "uploaded_at": data["t"],
         "bot_message_id": data.get("mid") or None,
+        "favorite": bool(data.get("fav", 0)),
+    }
+
+
+def parse_folder_caption(text: str) -> Optional[dict]:
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("v") != CAPTION_VERSION or data.get("k") != "folder":
+        return None
+    if not all(k in data for k in ("n", "p", "t", "id")):
+        return None
+    return {
+        "name": data["n"],
+        "path": data["p"],
+        "created_at": data["t"],
+        "uid": data["id"],
+        "bot_message_id": data.get("mid") or None,
+        "favorite": bool(data.get("fav", 0)),
     }
 
 
@@ -91,6 +140,31 @@ async def _ensure_sync_folder_path(parts: list[str]) -> int:
     return parent_id  # type: ignore[return-value]
 
 
+async def _import_folder_message(message) -> bool:
+    caption = message.message or ""
+    parsed = parse_folder_caption(caption)
+    if parsed is None:
+        return False
+
+    raw_path = parsed["path"].strip("/")
+    parts = [part for part in raw_path.split("/") if part]
+    if not parts:
+        return False
+    *parent_parts, name = parts
+    parent_id = await _ensure_sync_folder_path(parent_parts) if parent_parts else None
+    tg_msg_id = parsed.get("bot_message_id") or message.id
+    folder_id = await create_folder(
+        name=name,
+        parent_id=parent_id,
+        created_at=parsed["created_at"],
+        uid=parsed["uid"],
+        tg_message_id=tg_msg_id,
+        favorite=parsed["favorite"],
+    )
+    await update_folder_favorite(folder_id, parsed["favorite"])
+    return True
+
+
 async def _import_message(
     message,
     known_uids: Optional[set[str]] = None,
@@ -106,8 +180,6 @@ async def _import_message(
 
     Returns True if the message was inserted.
     """
-    from telethon.utils import pack_bot_file_id
-
     # Never re-import intentionally deleted messages
     if deleted_msg_ids is None:
         deleted_msg_ids = await list_deleted_message_ids()
@@ -135,6 +207,8 @@ async def _import_message(
     file_id = parsed["tg_file_id"]
     if not file_id and message.media is not None:
         try:
+            from telethon.utils import pack_bot_file_id
+
             file_id = pack_bot_file_id(message.media)
         except Exception:
             return False
@@ -163,6 +237,7 @@ async def _import_message(
         encrypted=parsed["encrypted"],
         folder_id=folder_id,
         uid=uid,
+        favorite=parsed["favorite"],
     )
     if uid:
         known_uids.add(uid)
@@ -200,7 +275,8 @@ async def _run_sync(client, chat_entity) -> dict:
         # the "mid" field normalises both sides to the same ID space.
         caption = message.message or ""
         parsed = parse_caption(caption)
-        effective_id = (parsed or {}).get("bot_message_id") or message.id
+        folder_parsed = parse_folder_caption(caption)
+        effective_id = (parsed or folder_parsed or {}).get("bot_message_id") or message.id
         telegram_msg_ids.add(effective_id)
 
         # Never re-import intentionally deleted messages
@@ -213,7 +289,10 @@ async def _run_sync(client, chat_entity) -> dict:
             continue
 
         if parsed is None:
-            skipped_no_caption += 1
+            if await _import_folder_message(message):
+                imported += 1
+            else:
+                skipped_no_caption += 1
             continue
 
         uid = parsed["uid"]

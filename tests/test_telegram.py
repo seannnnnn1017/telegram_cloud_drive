@@ -1,4 +1,5 @@
 import pytest
+import json
 from pytest_httpx import HTTPXMock
 from backend.telegram import TelegramClient
 
@@ -102,8 +103,10 @@ async def test_copy_message(httpx_mock: HTTPXMock, tg: TelegramClient):
         url="https://api.telegram.org/botTESTTOKEN/copyMessage",
         json={"ok": True, "result": {"message_id": 99}},
     )
-    message_id = await tg.copy_message(12345, 7)
+    message_id = await tg.copy_message(12345, 7, caption='{"v":1}')
     assert message_id == 99
+    request = httpx_mock.get_requests()[0]
+    assert json.loads(request.content)["caption"] == '{"v":1}'
 
 
 async def test_local_bot_api_base_url(httpx_mock: HTTPXMock):

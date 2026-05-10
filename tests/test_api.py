@@ -12,8 +12,9 @@ from httpx import AsyncClient, ASGITransport
 db_module.DB_PATH = Path(tempfile.gettempdir()) / "test_vault_api.db"
 
 from backend.main import app
-from backend.main import extract_message_file
-from backend.database import init_db
+from backend.main import extract_message_file, ingest_telegram_message
+from backend.database import init_db, list_deleted_message_ids, list_files
+from backend.sync import parse_caption
 
 
 @pytest.fixture(autouse=True)
@@ -84,6 +85,47 @@ def test_extract_telegram_video_message():
     assert info["name"] == "clip.mov"
     assert info["file_id"] == "VIDEO"
     assert info["thumb_file_id"] == "THUMB"
+
+
+async def test_ingest_telegram_message_writes_identifying_caption_json():
+    tg = AsyncMock()
+    tg.copy_message.return_value = 200
+    message = {
+        "message_id": 13,
+        "chat": {"id": 12345},
+        "video": {
+            "file_id": "VIDEO",
+            "file_name": "clip.mov",
+            "file_size": 2000,
+            "mime_type": "video/quicktime",
+            "thumbnail": {"file_id": "THUMB"},
+        },
+    }
+
+    inserted = await ingest_telegram_message(tg, message)
+
+    assert inserted is True
+    tg.copy_message.assert_awaited_once()
+    copy_kwargs = tg.copy_message.await_args.kwargs
+    initial_caption = parse_caption(copy_kwargs["caption"])
+    assert initial_caption is not None
+    assert initial_caption["name"] == "clip.mov"
+    assert initial_caption["tg_file_id"] == "VIDEO"
+    assert initial_caption["tg_thumb_file_id"] == "THUMB"
+    assert initial_caption["uid"]
+
+    tg.edit_message_caption.assert_awaited_once()
+    edit_args = tg.edit_message_caption.await_args.args
+    assert edit_args[0] == 200
+    final_caption = parse_caption(edit_args[1])
+    assert final_caption is not None
+    assert final_caption["bot_message_id"] == 200
+    assert final_caption["uid"] == initial_caption["uid"]
+
+    files = await list_files()
+    assert len(files) == 1
+    assert files[0].tg_message_id == 200
+    assert files[0].uid == initial_caption["uid"]
 
 
 async def test_upload_file_too_large(mock_tg, client):
@@ -289,6 +331,21 @@ async def test_delete_file(mock_tg, client):
         assert r.status_code == 200
         r2 = await c.get(f"/api/files/{fid}/download")
     assert r2.status_code == 404
+    assert 100 in await list_deleted_message_ids()
+
+
+async def test_delete_file_keeps_local_delete_when_telegram_delete_fails(mock_tg, client):
+    mock_tg.delete_message.side_effect = ValueError("Telegram deleteMessage failed: permission denied")
+    async with client as c:
+        up = await c.post("/api/upload", files={"file": ("del.jpg", b"d", "image/jpeg")})
+        fid = up.json()["id"]
+        r = await c.delete(f"/api/files/{fid}")
+        remaining = await c.get("/api/files")
+
+    assert r.status_code == 200
+    assert r.json()["remote_failed"] == 1
+    assert remaining.json() == []
+    assert 100 in await list_deleted_message_ids()
 
 
 async def test_delete_not_found(client):
@@ -307,6 +364,31 @@ async def test_bulk_delete(mock_tg, client):
         assert r.json()["deleted"] == 2
         remaining = await c.get("/api/files")
     assert remaining.json() == []
+
+
+async def test_bulk_delete_continues_after_one_telegram_delete_failure(mock_tg, client):
+    async def delete_side_effect(message_id):
+        if message_id == 100:
+            raise ValueError("Telegram deleteMessage failed: permission denied")
+        return True
+
+    mock_tg.send_document.side_effect = [
+        {"file_id": "TG_FILE_1", "message_id": 100},
+        {"file_id": "TG_FILE_2", "message_id": 101},
+    ]
+    mock_tg.delete_message.side_effect = delete_side_effect
+    async with client as c:
+        up1 = await c.post("/api/upload", files={"file": ("a.jpg", b"d", "image/jpeg")})
+        up2 = await c.post("/api/upload", files={"file": ("b.jpg", b"d", "image/jpeg")})
+        ids = [up1.json()["id"], up2.json()["id"]]
+        r = await c.post("/api/files/bulk-delete", json={"ids": ids})
+        remaining = await c.get("/api/files")
+
+    assert r.status_code == 200
+    assert r.json()["deleted"] == 2
+    assert r.json()["remote_failed"] == 1
+    assert remaining.json() == []
+    assert {100, 101}.issubset(await list_deleted_message_ids())
 
 
 async def test_bulk_download_zip(mock_tg, client):

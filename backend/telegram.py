@@ -108,19 +108,38 @@ class TelegramClient:
             raise ValueError(f"Telegram getChat failed: {chat_data.get('description', 'unknown error')}")
         return {"bot": me_data["result"], "chat": chat_data["result"]}
 
-    async def copy_message(self, from_chat_id: int | str, message_id: int) -> int:
+    async def copy_message(
+        self,
+        from_chat_id: int | str,
+        message_id: int,
+        caption: Optional[str] = None,
+    ) -> int:
+        payload = {
+            "chat_id": self._chat_id,
+            "from_chat_id": from_chat_id,
+            "message_id": message_id,
+        }
+        if caption is not None:
+            payload["caption"] = caption
         r = await self._client.post(
             f"{self._api}/copyMessage",
-            json={
-                "chat_id": self._chat_id,
-                "from_chat_id": from_chat_id,
-                "message_id": message_id,
-            },
+            json=payload,
             timeout=60.0,
         )
         data = r.json()
         if not data.get("ok"):
             raise ValueError(f"Telegram error {r.status_code}: {data.get('description', 'unknown error')}")
+        return data["result"]["message_id"]
+
+    async def send_message(self, text: str) -> int:
+        r = await self._client.post(
+            f"{self._api}/sendMessage",
+            json={"chat_id": self._chat_id, "text": text},
+            timeout=10.0,
+        )
+        data = r.json()
+        if not data.get("ok"):
+            raise ValueError(f"Telegram sendMessage error: {data.get('description', 'unknown error')}")
         return data["result"]["message_id"]
 
     async def download_file(self, file_id: str) -> bytes:
@@ -158,3 +177,13 @@ class TelegramClient:
         data = r.json()
         if not data.get("ok"):
             raise ValueError(f"Telegram editMessageCaption error: {data.get('description', 'unknown error')}")
+
+    async def edit_message_text(self, message_id: int, text: str) -> None:
+        r = await self._client.post(
+            f"{self._api}/editMessageText",
+            json={"chat_id": self._chat_id, "message_id": message_id, "text": text},
+            timeout=10.0,
+        )
+        data = r.json()
+        if not data.get("ok"):
+            raise ValueError(f"Telegram editMessageText error: {data.get('description', 'unknown error')}")
