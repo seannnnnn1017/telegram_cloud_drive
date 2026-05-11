@@ -237,6 +237,22 @@ async def get_folder_by_name(name: str, parent_id: Optional[int]) -> Optional[Fo
             return FolderRecord(**dict(row)) if row else None
 
 
+async def get_folder_by_uid(uid: str) -> Optional[FolderRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM folders WHERE uid = ?", (uid,)) as cur:
+            row = await cur.fetchone()
+            return FolderRecord(**dict(row)) if row else None
+
+
+async def get_folder_by_message_id(tg_message_id: int) -> Optional[FolderRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM folders WHERE tg_message_id = ?", (tg_message_id,)) as cur:
+            row = await cur.fetchone()
+            return FolderRecord(**dict(row)) if row else None
+
+
 async def update_folder_metadata(folder_id: int, uid: Optional[str] = None, tg_message_id: Optional[int] = None) -> Optional[FolderRecord]:
     sets, params = [], []
     if uid is not None:
@@ -251,6 +267,32 @@ async def update_folder_metadata(folder_id: int, uid: Optional[str] = None, tg_m
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(f"UPDATE folders SET {', '.join(sets)} WHERE id = ?", params)
+        if cur.rowcount == 0:
+            await db.commit()
+            return None
+        await db.commit()
+        async with db.execute("SELECT * FROM folders WHERE id = ?", (folder_id,)) as get_cur:
+            row = await get_cur.fetchone()
+            return FolderRecord(**dict(row)) if row else None
+
+
+async def update_file_folder(file_id: int, folder_id: Optional[int]) -> Optional[FileRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("UPDATE files SET folder_id = ? WHERE id = ?", (folder_id, file_id))
+        if cur.rowcount == 0:
+            await db.commit()
+            return None
+        await db.commit()
+        async with db.execute("SELECT * FROM files WHERE id = ?", (file_id,)) as get_cur:
+            row = await get_cur.fetchone()
+            return FileRecord(**dict(row)) if row else None
+
+
+async def update_folder_parent(folder_id: int, parent_id: Optional[int]) -> Optional[FolderRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("UPDATE folders SET parent_id = ? WHERE id = ?", (parent_id, folder_id))
         if cur.rowcount == 0:
             await db.commit()
             return None
@@ -346,6 +388,19 @@ async def delete_folders(ids: list[int]) -> int:
         return cur.rowcount
 
 
+async def delete_folders_by_message_ids(msg_ids: set[int]) -> int:
+    if not msg_ids:
+        return 0
+    placeholders = ",".join("?" * len(msg_ids))
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            f"DELETE FROM folders WHERE tg_message_id IN ({placeholders})",
+            list(msg_ids),
+        )
+        await db.commit()
+        return cur.rowcount
+
+
 async def get_folder_path(folder_id: int) -> list[str]:
     """Return folder names from root to leaf for the given folder_id."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -366,6 +421,12 @@ async def get_folder_path(folder_id: int) -> list[str]:
 async def list_all_message_ids() -> set[int]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT tg_message_id FROM files") as cur:
+            return {row[0] for row in await cur.fetchall()}
+
+
+async def list_all_folder_message_ids() -> set[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT tg_message_id FROM folders WHERE tg_message_id IS NOT NULL") as cur:
             return {row[0] for row in await cur.fetchall()}
 
 

@@ -16,6 +16,7 @@ const state = {
   folderChildren: new Map(),
   visibleFiles: [],
   visibleFolders: [],
+  clipboard: null,
   previewingIds: new Set(),
   previewRequestId: 0,
   previewObjectUrl: null,
@@ -327,6 +328,69 @@ function updateBulkBar() {
   const n = state.selected.size + state.selectedFolders.size;
   document.getElementById('bulk-count').textContent = `已選 ${n} 個`;
   bar.classList.toggle('show', n > 0);
+  document.getElementById('bulk-paste').disabled = !state.clipboard;
+}
+
+function selectedPayload(fallback = null) {
+  const fileIds = Array.from(state.selected);
+  const folderIds = Array.from(state.selectedFolders);
+  if (fileIds.length || folderIds.length) return { fileIds, folderIds };
+  if (fallback?.kind === 'file') return { fileIds: [fallback.file.id], folderIds: [] };
+  if (fallback?.kind === 'folder') return { fileIds: [], folderIds: [fallback.folder.id] };
+  return { fileIds: [], folderIds: [] };
+}
+
+function setClipboard(operation, payload) {
+  const total = payload.fileIds.length + payload.folderIds.length;
+  if (!total) return;
+  state.clipboard = { operation, fileIds: payload.fileIds, folderIds: payload.folderIds };
+  toast(`${operation === 'move' ? '已剪下' : '已複製'} ${total} 個項目`);
+  updateBulkBar();
+}
+
+async function relocateItems(payload, targetFolderId, operation) {
+  const total = payload.fileIds.length + payload.folderIds.length;
+  if (!total) return false;
+  const progressId = createUploadProgress(`${operation === 'move' ? 'Moving' : 'Copying'} ${total} item(s)`);
+  setUploadProgress(progressId, 20);
+  try {
+    const r = await fetch('/api/items/relocate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        file_ids: payload.fileIds,
+        folder_ids: payload.folderIds,
+        target_folder_id: targetFolderId,
+        operation,
+      }),
+    });
+    if (!r.ok) {
+      try { toast((await r.json()).detail || 'Move failed', true); }
+      catch { toast('Move failed', true); }
+      return false;
+    }
+    const data = await r.json();
+    setUploadProgress(progressId, 100);
+    const changed = operation === 'move'
+      ? (data.moved_files || 0) + (data.moved_folders || 0)
+      : (data.copied_files || 0) + (data.copied_folders || 0);
+    toast(`${operation === 'move' ? 'Moved' : 'Copied'} ${changed} item(s)${data.remote_failed ? '; remote metadata needs attention' : ''}`, !!data.remote_failed);
+    state.selected.clear();
+    state.selectedFolders.clear();
+    state.folderChildren.clear();
+    await loadFiles();
+    loadStorage();
+    return true;
+  } finally {
+    finishUploadProgress(progressId);
+  }
+}
+
+async function pasteClipboard(targetFolderId = state.folderId) {
+  if (!state.clipboard) return;
+  const ok = await relocateItems(state.clipboard, targetFolderId, state.clipboard.operation);
+  if (ok && state.clipboard.operation === 'move') state.clipboard = null;
+  updateBulkBar();
 }
 
 function renderPathbar() {
@@ -376,6 +440,9 @@ document.getElementById('bulk-cancel').onclick = () => {
   state.selectedFolders.clear();
   renderFiles();
 };
+document.getElementById('bulk-cut').onclick = () => setClipboard('move', selectedPayload());
+document.getElementById('bulk-copy-items').onclick = () => setClipboard('copy', selectedPayload());
+document.getElementById('bulk-paste').onclick = () => pasteClipboard(state.folderId);
 
 document.getElementById('bulk-download').onclick = async () => {
   const ids = Array.from(state.selected);
@@ -772,11 +839,24 @@ document.getElementById('folder-input').onchange = async (e) => {
   e.target.value = '';
 };
 
-document.addEventListener('dragover', (e) => { e.preventDefault(); document.getElementById('drop-overlay').classList.add('show'); });
+document.addEventListener('dragover', (e) => {
+  if (isInternalDrag(e)) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    return;
+  }
+  e.preventDefault();
+  document.getElementById('drop-overlay').classList.add('show');
+});
 document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.getElementById('drop-overlay').classList.remove('show'); });
 document.addEventListener('drop', async (e) => {
   e.preventDefault();
   document.getElementById('drop-overlay').classList.remove('show');
+  if (isInternalDrag(e)) {
+    const payload = JSON.parse(e.dataTransfer.getData('application/x-telecloud-items') || '{}');
+    await relocateItems({ fileIds: payload.fileIds || [], folderIds: payload.folderIds || [] }, state.folderId, 'move');
+    return;
+  }
   const files = await filesFromDrop(e.dataTransfer);
   await uploadFilesTracked(files);
 });
@@ -859,6 +939,71 @@ function setFolderSelection(row, id, selected) {
   if (cb) cb.checked = selected;
 }
 
+function dragPayloadFromElement(el) {
+  const fileEl = el.closest('.file-item');
+  const folderEl = el.closest('.folder-item');
+  if (fileEl) {
+    const id = parseInt(fileEl.dataset.id);
+    if (!state.selected.has(id)) {
+      state.selected.clear();
+      state.selectedFolders.clear();
+      setRowSelection(fileEl, true);
+    }
+  } else if (folderEl) {
+    const id = parseInt(folderEl.dataset.folderId);
+    if (!state.selectedFolders.has(id)) {
+      state.selected.clear();
+      state.selectedFolders.clear();
+      setFolderSelection(folderEl, id, true);
+    }
+  }
+  updateBulkBar();
+  return selectedPayload();
+}
+
+function isInternalDrag(e) {
+  return Array.from(e.dataTransfer?.types || []).includes('application/x-telecloud-items');
+}
+
+function installInternalDragHandlers(list) {
+  list.querySelectorAll('.file-item,.folder-item').forEach(item => {
+    item.addEventListener('dragstart', (e) => {
+      if (e.target.closest('button,input')) {
+        e.preventDefault();
+        return;
+      }
+      const payload = dragPayloadFromElement(item);
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('application/x-telecloud-items', JSON.stringify(payload));
+      e.dataTransfer.setData('text/plain', 'telecloud-items');
+      item.classList.add('dragging');
+    });
+    item.addEventListener('dragend', () => {
+      document.querySelectorAll('.drop-target,.dragging').forEach(el => el.classList.remove('drop-target', 'dragging'));
+    });
+  });
+
+  list.querySelectorAll('.folder-item').forEach(item => {
+    item.addEventListener('dragover', (e) => {
+      if (!isInternalDrag(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = 'move';
+      item.classList.add('drop-target');
+    });
+    item.addEventListener('dragleave', () => item.classList.remove('drop-target'));
+    item.addEventListener('drop', async (e) => {
+      if (!isInternalDrag(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      item.classList.remove('drop-target');
+      const payload = JSON.parse(e.dataTransfer.getData('application/x-telecloud-items') || '{}');
+      const targetFolderId = parseInt(item.dataset.folderId);
+      await relocateItems({ fileIds: payload.fileIds || [], folderIds: payload.folderIds || [] }, targetFolderId, 'move');
+    });
+  });
+}
+
 function updateBoxSelection(selectRect, baseSelection, baseFolderSelection, append) {
   document.querySelectorAll('#file-list .file-item').forEach(row => {
     const id = parseInt(row.dataset.id);
@@ -886,6 +1031,7 @@ function installBoxSelection() {
   document.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     if (e.target.closest('button,input,.tab,.list-header,.bulk-bar,.modal-bg,.ctx-menu,.upload-toast,.toast-area')) return;
+    if (e.target.closest('.file-item,.folder-item')) return;
 
     closeCtx();
     drag = {
@@ -1034,7 +1180,7 @@ function fileItemMarkup(f) {
   const depth = f.__depth || 0;
   if (state.view === 'list') {
     return `
-    <div class="row file-row file-item${sel ? ' selected' : ''}" data-id="${f.id}" data-depth="${depth}" style="--depth:${depth}">
+    <div class="row file-row file-item${sel ? ' selected' : ''}" data-id="${f.id}" data-depth="${depth}" style="--depth:${depth}" draggable="true">
       <input type="checkbox" class="cb" data-cb="${f.id}" ${sel ? 'checked' : ''}>
       <div class="name-cell">
         ${indentRail(depth)}
@@ -1056,7 +1202,7 @@ function fileItemMarkup(f) {
     ? `<img src="/api/files/${f.id}/thumbnail" alt="${esc(f.name)}" loading="lazy" onerror="this.replaceWith(this.nextElementSibling)"><div class="ic ${icon}"><svg width="18" height="18"><use href="#i-${icon}"/></svg></div>`
     : `<div class="ic ${icon}"><svg width="20" height="20"><use href="#i-${icon}"/></svg></div>`;
   return `
-    <div class="file-card file-item${sel ? ' selected' : ''}" data-id="${f.id}">
+    <div class="file-card file-item${sel ? ' selected' : ''}" data-id="${f.id}" draggable="true">
       <input type="checkbox" class="cb" data-cb="${f.id}" ${sel ? 'checked' : ''}>
       ${favBtnHtml(f,'file')}
       <button class="more-btn" data-more="${f.id}"><svg width="14" height="14"><use href="#i-dots"/></svg></button>
@@ -1076,7 +1222,7 @@ function folderItemMarkup(folder) {
     const children = state.folderChildren.get(folder.id);
     const count = children ? children.files.length + children.folders.length : (folder.item_count || folder.count || 0);
     return `
-    <div class="row folder-row folder-item${sel ? ' selected' : ''}${expanded ? ' is-open' : ''}" data-folder-id="${folder.id}" data-depth="${depth}" style="--depth:${depth}">
+    <div class="row folder-row folder-item${sel ? ' selected' : ''}${expanded ? ' is-open' : ''}" data-folder-id="${folder.id}" data-depth="${depth}" style="--depth:${depth}" draggable="true">
       <input type="checkbox" class="cb" data-cb-folder="${folder.id}" ${sel ? 'checked' : ''}>
       <div class="name-cell">
         ${indentRail(depth)}
@@ -1098,7 +1244,7 @@ function folderItemMarkup(folder) {
     </div>`;
   }
   return `
-    <div class="file-card folder-card folder-item${sel ? ' selected' : ''}" data-folder-id="${folder.id}">
+    <div class="file-card folder-card folder-item${sel ? ' selected' : ''}" data-folder-id="${folder.id}" draggable="true">
       <input type="checkbox" class="cb" data-cb-folder="${folder.id}" ${sel ? 'checked' : ''}>
       ${favBtnHtml(folder,'folder')}
       <button class="more-btn" data-more-folder="${folder.id}"><svg width="14" height="14"><use href="#i-dots"/></svg></button>
@@ -1279,6 +1425,7 @@ function renderFiles() {
     list.innerHTML = displayFolders.map(folderItemMarkup).join('') + displayFiles.map(fileItemMarkup).join('');
   }
   attachFolderHandlers(list);
+  installInternalDragHandlers(list);
 
   list.querySelectorAll('.file-item').forEach(row => {
     const id = parseInt(row.dataset.id);
@@ -1557,6 +1704,8 @@ function showCtx(e, target) {
       { key: 'download', icon: '#i-down', label: '下載' },
       { key: 'rename-file', icon: '#i-doc', label: '重新命名' },
       { key: 'copy-link', icon: '#i-copy', label: '複製連結' },
+      { key: 'cut-items', icon: '#i-folder', label: '剪下' },
+      { key: 'copy-items', icon: '#i-copy', label: '複製檔案' },
       { sep: true },
       { key: 'delete-file', icon: '#i-trash', label: '刪除', danger: true }
     );
@@ -1567,25 +1716,34 @@ function showCtx(e, target) {
       actions.push(
         { key: 'download-selected', icon: '#i-down', label: '下載選取' },
         { key: 'copy-selected', icon: '#i-copy', label: '複製連結' },
+        { key: 'cut-items', icon: '#i-folder', label: '剪下選取' },
+        { key: 'copy-items', icon: '#i-copy', label: '複製選取' },
         { sep: true },
         { key: 'delete-selected', icon: '#i-trash', label: '刪除選取', danger: true }
       );
     }
+    if (state.clipboard) actions.push({ sep: true }, { key: 'paste-items', icon: '#i-folder-open', label: '貼上到這裡' });
   } else if (target?.kind === 'folder') {
     const folder = target.folder;
     actions.push(
       { key: 'open-folder', icon: '#i-folder', label: '開啟' },
       { key: 'create-folder', icon: '#i-folder', label: '創資料夾' },
       { key: 'copy-path', icon: '#i-copy', label: '複製路徑' },
+      { key: 'cut-items', icon: '#i-folder', label: '剪下' },
+      { key: 'copy-items', icon: '#i-copy', label: '複製資料夾' },
+      ...(state.clipboard ? [{ key: 'paste-into-folder', icon: '#i-folder-open', label: '貼入資料夾' }] : []),
       { sep: true },
       { key: 'delete-folder', icon: '#i-trash', label: '刪除資料夾', danger: true }
     );
   } else {
     actions.push({ key: 'create-folder', icon: '#i-folder', label: '創資料夾' });
-    if (state.selected.size > 0) {
+    if (state.clipboard) actions.push({ key: 'paste-items', icon: '#i-folder-open', label: '貼上' });
+    if (state.selected.size + state.selectedFolders.size > 0) {
       actions.push(
         { key: 'download-selected', icon: '#i-down', label: '下載選取' },
         { key: 'copy-selected', icon: '#i-copy', label: '複製連結' },
+        { key: 'cut-items', icon: '#i-folder', label: '剪下選取' },
+        { key: 'copy-items', icon: '#i-copy', label: '複製選取' },
         { sep: true },
         { key: 'delete-selected', icon: '#i-trash', label: '刪除選取', danger: true }
       );
@@ -1615,6 +1773,10 @@ async function runCtxAction(action) {
     else if (action === 'create-folder') await promptCreateFolder(ctxTarget?.kind === 'folder' ? ctxTarget.folder.id : state.folderId);
     else if (action === 'copy-path' && ctxTarget?.kind === 'folder') await copyText(folderPathLabel(ctxTarget.folder));
     else if (action === 'delete-folder' && ctxTarget?.kind === 'folder') await deleteFolder(ctxTarget.folder);
+    else if (action === 'cut-items') setClipboard('move', selectedPayload(ctxTarget));
+    else if (action === 'copy-items') setClipboard('copy', selectedPayload(ctxTarget));
+    else if (action === 'paste-items') await pasteClipboard(state.folderId);
+    else if (action === 'paste-into-folder' && ctxTarget?.kind === 'folder') await pasteClipboard(ctxTarget.folder.id);
     else if (action === 'download-selected') document.getElementById('bulk-download').click();
     else if (action === 'copy-selected') {
       const links = (await Promise.all(

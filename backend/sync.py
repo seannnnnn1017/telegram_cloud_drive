@@ -7,15 +7,20 @@ from typing import Optional
 
 from .database import (
     create_folder,
+    delete_folders_by_message_ids,
     delete_files_by_message_ids,
     get_folder,
     get_folder_by_name,
+    get_folder_by_uid,
+    get_folder_by_message_id,
     insert_file,
+    list_all_folder_message_ids,
     list_all_message_ids,
     list_all_uids,
     list_deleted_message_ids,
     remove_deleted_message_ids,
     update_folder_favorite,
+    update_folder_metadata,
 )
 
 CAPTION_VERSION = 1
@@ -153,6 +158,22 @@ async def _import_folder_message(message) -> bool:
     *parent_parts, name = parts
     parent_id = await _ensure_sync_folder_path(parent_parts) if parent_parts else None
     tg_msg_id = parsed.get("bot_message_id") or message.id
+    folder = await get_folder_by_uid(parsed["uid"])
+    if folder is None:
+        folder = await get_folder_by_message_id(tg_msg_id)
+    if folder is None:
+        folder = await get_folder_by_name(name, parent_id)
+    if folder is not None:
+        updates: dict = {}
+        if not folder.uid:
+            updates["uid"] = parsed["uid"]
+        if not folder.tg_message_id:
+            updates["tg_message_id"] = tg_msg_id
+        if updates:
+            folder = await update_folder_metadata(folder.id, **updates)
+        await update_folder_favorite(folder.id, parsed["favorite"])
+        return False
+
     folder_id = await create_folder(
         name=name,
         parent_id=parent_id,
@@ -252,6 +273,7 @@ async def _run_sync(client, chat_entity) -> dict:
 
     # Snapshot of DB state before the scan — used to detect orphaned records
     db_msg_ids = await list_all_message_ids()
+    db_folder_msg_ids = await list_all_folder_message_ids()
     known_uids = await list_all_uids()
     known_msg_ids = set(db_msg_ids)  # mutable copy for import dedup
     deleted_msg_ids = await list_deleted_message_ids()  # tombstones — never re-import
@@ -309,9 +331,17 @@ async def _run_sync(client, chat_entity) -> dict:
     # Remove local records whose Telegram messages no longer exist
     # (exclude tombstoned IDs — they're already absent from DB intentionally)
     orphaned = db_msg_ids - telegram_msg_ids - deleted_msg_ids
-    deleted = await delete_files_by_message_ids(orphaned)
+    deleted_files = await delete_files_by_message_ids(orphaned)
+    orphaned_folders = db_folder_msg_ids - telegram_msg_ids - deleted_msg_ids
+    deleted_folders = await delete_folders_by_message_ids(orphaned_folders)
+    deleted = deleted_files + deleted_folders
     if deleted:
-        log.warning("sync: removed %s orphaned record(s)", deleted)
+        log.warning(
+            "sync: removed %s orphaned record(s): files=%s folders=%s",
+            deleted,
+            deleted_files,
+            deleted_folders,
+        )
 
     # Clean up tombstones for messages confirmed gone from Telegram
     confirmed_gone = deleted_msg_ids - telegram_msg_ids
@@ -549,9 +579,11 @@ async def start_sync_listener(on_change=None) -> None:
         @client.on(events.MessageDeleted)
         async def _on_deleted(event):
             try:
-                deleted = await delete_files_by_message_ids(set(event.deleted_ids))
+                ids = set(event.deleted_ids)
+                deleted = await delete_files_by_message_ids(ids)
+                deleted += await delete_folders_by_message_ids(ids)
                 if deleted:
-                    log.warning("sync delete event: removed %s file(s)", deleted)
+                    log.warning("sync delete event: removed %s item(s)", deleted)
                     await _notify({"imported": 0, "deleted": deleted})
             except Exception as exc:
                 log.warning("sync delete handler error: %s", exc)

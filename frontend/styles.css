@@ -77,6 +77,8 @@
   .row:hover{background:rgba(255,255,255,0.02)}
   .row:last-child{border-bottom:0}
   .row.selected{background:rgba(0,255,102,0.04)}
+  .row.dragging,.file-card.dragging{opacity:.45}
+  .folder-item.drop-target{outline:1px solid rgba(0,255,102,0.75);outline-offset:-2px;background:rgba(0,255,102,0.08)}
   .selection-box{position:fixed;left:0;top:0;width:0;height:0;border:1px solid rgba(0,255,102,0.75);background:rgba(0,255,102,0.1);pointer-events:none;z-index:250;display:none}
   body.box-selecting{user-select:none;cursor:crosshair}
 

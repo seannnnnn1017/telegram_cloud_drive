@@ -29,6 +29,8 @@ async def setup_db():
 def mock_tg():
     tg = AsyncMock()
     tg.send_document.return_value = {"file_id": "TG_FILE_1", "message_id": 100}
+    tg.copy_message.return_value = 101
+    tg.send_message.return_value = 102
     tg.download_file.return_value = b"fake file content"
     tg.delete_message.return_value = True
     with patch("backend.main.get_tg_client", return_value=tg):
@@ -216,7 +218,7 @@ async def test_delete_folder_recursive(mock_tg, client):
     assert r.json()["deleted_files"] == 1
     assert remaining_files.json() == []
     assert remaining_root_folders.json() == []
-    mock_tg.delete_message.assert_awaited_with(100)
+    mock_tg.delete_message.assert_any_await(100)
 
 
 async def test_upload_file_to_folder(mock_tg, client):
@@ -532,6 +534,67 @@ async def test_shutdown_server_signals_sse_clients(client):
         if q in _sse_clients:
             _sse_clients.remove(q)
         app.state.shutdown_requested = False
+
+
+async def test_move_file_to_folder_updates_location(mock_tg, client):
+    async with client as c:
+        folder = await c.post("/api/folders", json={"name": "docs", "parent_id": None})
+        up = await c.post("/api/upload", files={"file": ("move.txt", b"d", "text/plain")})
+        fid = up.json()["id"]
+
+        moved = await c.post(
+            "/api/items/relocate",
+            json={"file_ids": [fid], "folder_ids": [], "target_folder_id": folder.json()["id"], "operation": "move"},
+        )
+        root_files = await c.get("/api/files")
+        folder_files = await c.get(f"/api/files?folder_id={folder.json()['id']}")
+
+    assert moved.status_code == 200
+    assert moved.json()["moved_files"] == 1
+    assert root_files.json() == []
+    assert folder_files.json()[0]["id"] == fid
+
+
+async def test_copy_file_to_folder_creates_new_record(mock_tg, client):
+    mock_tg.copy_message.return_value = 201
+    async with client as c:
+        folder = await c.post("/api/folders", json={"name": "copies", "parent_id": None})
+        up = await c.post("/api/upload", files={"file": ("copy.txt", b"d", "text/plain")})
+        fid = up.json()["id"]
+
+        copied = await c.post(
+            "/api/items/relocate",
+            json={"file_ids": [fid], "folder_ids": [], "target_folder_id": folder.json()["id"], "operation": "copy"},
+        )
+        root_files = await c.get("/api/files")
+        folder_files = await c.get(f"/api/files?folder_id={folder.json()['id']}")
+
+    assert copied.status_code == 200
+    assert copied.json()["copied_files"] == 1
+    assert len(root_files.json()) == 1
+    assert len(folder_files.json()) == 1
+    assert folder_files.json()[0]["name"] == "copy.txt"
+    assert folder_files.json()[0]["id"] != fid
+
+
+async def test_copy_file_keeps_record_when_caption_update_fails(mock_tg, client):
+    mock_tg.copy_message.return_value = 201
+    async with client as c:
+        folder = await c.post("/api/folders", json={"name": "copies", "parent_id": None})
+        up = await c.post("/api/upload", files={"file": ("copy.txt", b"d", "text/plain")})
+        fid = up.json()["id"]
+        mock_tg.edit_message_caption.side_effect = RuntimeError("caption failed")
+
+        copied = await c.post(
+            "/api/items/relocate",
+            json={"file_ids": [fid], "folder_ids": [], "target_folder_id": folder.json()["id"], "operation": "copy"},
+        )
+        folder_files = await c.get(f"/api/files?folder_id={folder.json()['id']}")
+
+    assert copied.status_code == 200
+    assert copied.json()["copied_files"] == 1
+    assert copied.json()["remote_failed"] == 1
+    assert len(folder_files.json()) == 1
 
 
 async def test_share_link_expiry(mock_tg, client):

@@ -48,6 +48,23 @@ class BulkDeleteRequest(BaseModel):
     ids: list[int]
 
 
+class ItemRelocateRequest(BaseModel):
+    file_ids: list[int] = []
+    folder_ids: list[int] = []
+    target_folder_id: Optional[int] = None
+    operation: str = "move"
+
+
+class ItemRelocateResponse(BaseModel):
+    ok: bool
+    moved_files: int = 0
+    moved_folders: int = 0
+    copied_files: int = 0
+    copied_folders: int = 0
+    remote_failed: int = 0
+    errors: list[str] = []
+
+
 class FolderRecord(BaseModel):
     id: int
     parent_id: Optional[int] = None

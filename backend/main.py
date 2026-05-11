@@ -40,8 +40,10 @@ from .database import (
     list_folders,
     update_file_name,
     update_file_favorite,
+    update_file_folder,
     update_folder_favorite,
     update_folder_metadata,
+    update_folder_parent,
 )
 from .models import (
     BulkDeleteRequest,
@@ -51,6 +53,8 @@ from .models import (
     FolderCreateRequest,
     FolderEnsureRequest,
     FolderResponse,
+    ItemRelocateRequest,
+    ItemRelocateResponse,
     ShareCreateRequest,
     ShareCreateResponse,
     ServerSettingsRequest,
@@ -236,6 +240,133 @@ async def ensure_folder_telegram_metadata(folder) -> None:
     except Exception:
         if not folder.uid:
             await update_folder_metadata(folder.id, uid=uid)
+
+
+async def refresh_folder_tree_captions(folder_id: int) -> list[str]:
+    errors: list[str] = []
+    for fid in await list_folder_tree_ids(folder_id):
+        folder = await get_folder(fid)
+        if folder is None:
+            continue
+        try:
+            await ensure_folder_telegram_metadata(folder)
+        except Exception as exc:
+            errors.append(str(exc))
+        for record in await list_files(folder_id=fid):
+            try:
+                await get_tg_client().edit_message_caption(
+                    record.tg_message_id,
+                    await file_caption_for_record(record),
+                )
+            except Exception as exc:
+                errors.append(str(exc))
+    return errors
+
+
+async def unique_folder_name(name: str, parent_id: Optional[int]) -> str:
+    if await get_folder_by_name(name, parent_id) is None:
+        return name
+    stem = f"{name} copy"
+    if await get_folder_by_name(stem, parent_id) is None:
+        return stem
+    for index in range(2, 10_000):
+        candidate = f"{name} copy {index}"
+        if await get_folder_by_name(candidate, parent_id) is None:
+            return candidate
+    raise HTTPException(status_code=409, detail="Too many duplicate folder names")
+
+
+async def copy_file_record(record, target_folder_id: Optional[int]) -> tuple[bool, Optional[int], Optional[str]]:
+    uid = secrets.token_hex(8)
+    caption_name = record.name
+    if target_folder_id is not None:
+        parts = await get_folder_path(target_folder_id)
+        if parts:
+            caption_name = "/".join(parts) + "/" + record.name
+    uploaded_at = datetime.now(timezone.utc).isoformat()
+    caption = make_caption(
+        name=caption_name,
+        size=record.size,
+        mime_type=record.mime_type,
+        encrypted=bool(record.encrypted),
+        uploaded_at=uploaded_at,
+        uid=uid,
+        tg_file_id=record.tg_file_id,
+        tg_thumb_file_id=record.tg_thumb_file_id,
+        favorite=bool(record.favorite),
+    )
+    try:
+        message_id = await get_tg_client().copy_message(os.environ["CHAT_ID"], record.tg_message_id, caption=caption)
+    except Exception as exc:
+        return False, None, str(exc)
+    error = None
+    final_caption = make_caption(
+        name=caption_name,
+        size=record.size,
+        mime_type=record.mime_type,
+        encrypted=bool(record.encrypted),
+        uploaded_at=uploaded_at,
+        uid=uid,
+        tg_file_id=record.tg_file_id,
+        tg_thumb_file_id=record.tg_thumb_file_id,
+        bot_message_id=message_id,
+        favorite=bool(record.favorite),
+    )
+    try:
+        await get_tg_client().edit_message_caption(message_id, final_caption)
+    except Exception as exc:
+        error = str(exc)
+    new_id = await insert_file(
+        name=record.name,
+        size=record.size,
+        mime_type=record.mime_type,
+        tg_file_id=record.tg_file_id,
+        tg_thumb_file_id=record.tg_thumb_file_id,
+        tg_message_id=message_id,
+        uploaded_at=uploaded_at,
+        folder_id=target_folder_id,
+        encrypted=bool(record.encrypted),
+        uid=uid,
+        favorite=bool(record.favorite),
+    )
+    return True, new_id, error
+
+
+async def copy_folder_tree(source_folder, target_parent_id: Optional[int]) -> tuple[int, int, list[str]]:
+    errors: list[str] = []
+    copied_folders = 0
+    copied_files = 0
+    name = await unique_folder_name(source_folder.name, target_parent_id)
+    folder_id = await create_folder(
+        name=name,
+        parent_id=target_parent_id,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        uid=secrets.token_hex(8),
+        favorite=bool(source_folder.favorite),
+    )
+    copied_folders += 1
+    folder = await get_folder(folder_id)
+    try:
+        await ensure_folder_telegram_metadata(folder)
+    except Exception as exc:
+        errors.append(str(exc))
+
+    for record in await list_files(folder_id=source_folder.id):
+        ok, _, error = await copy_file_record(record, folder_id)
+        if ok:
+            copied_files += 1
+            if error:
+                errors.append(error)
+        elif error:
+            errors.append(error)
+
+    for child in await list_folders(parent_id=source_folder.id):
+        child_folders, child_files, child_errors = await copy_folder_tree(child, folder_id)
+        copied_folders += child_folders
+        copied_files += child_files
+        errors.extend(child_errors)
+
+    return copied_folders, copied_files, errors
 
 
 async def download_record_response(record, disposition: str = "attachment") -> Response:
@@ -794,6 +925,88 @@ async def api_update_folder_favorite(folder_id: int, body: FavoriteRequest):
     await ensure_folder_telegram_metadata(folder)
     folder = await get_folder(folder_id)
     return folder_response(folder)
+
+
+@app.post("/api/items/relocate", response_model=ItemRelocateResponse)
+async def api_relocate_items(body: ItemRelocateRequest):
+    operation = body.operation.strip().lower()
+    if operation not in {"move", "copy"}:
+        raise HTTPException(status_code=400, detail="Operation must be move or copy")
+    file_ids = list(dict.fromkeys(body.file_ids))
+    folder_ids = list(dict.fromkeys(body.folder_ids))
+    if not file_ids and not folder_ids:
+        raise HTTPException(status_code=400, detail="No items provided")
+    target_folder_id = body.target_folder_id
+    if target_folder_id is not None and await get_folder(target_folder_id) is None:
+        raise HTTPException(status_code=404, detail="Target folder not found")
+
+    for folder_id in folder_ids:
+        folder = await get_folder(folder_id)
+        if folder is None:
+            raise HTTPException(status_code=404, detail="Folder not found")
+        if operation == "move" and target_folder_id == folder_id:
+            raise HTTPException(status_code=400, detail="Cannot move a folder into itself")
+        if operation == "move" and target_folder_id in await list_folder_tree_ids(folder_id):
+            raise HTTPException(status_code=400, detail="Cannot move a folder into its own child")
+        if operation == "move" and await get_folder_by_name(folder.name, target_folder_id) is not None:
+            raise HTTPException(status_code=409, detail=f'A folder named "{folder.name}" already exists there')
+
+    errors: list[str] = []
+    moved_files = 0
+    moved_folders = 0
+    copied_files = 0
+    copied_folders = 0
+
+    if operation == "move":
+        for file_id in file_ids:
+            record = await update_file_folder(file_id, target_folder_id)
+            if record is None:
+                raise HTTPException(status_code=404, detail="File not found")
+            moved_files += 1
+            try:
+                await get_tg_client().edit_message_caption(record.tg_message_id, await file_caption_for_record(record))
+            except Exception as exc:
+                errors.append(str(exc))
+        for folder_id in folder_ids:
+            folder = await update_folder_parent(folder_id, target_folder_id)
+            if folder is None:
+                raise HTTPException(status_code=404, detail="Folder not found")
+            moved_folders += 1
+            errors.extend(await refresh_folder_tree_captions(folder.id))
+        state_changed = moved_files or moved_folders
+    else:
+        for file_id in file_ids:
+            record = await get_file(file_id)
+            if record is None:
+                raise HTTPException(status_code=404, detail="File not found")
+            ok, _, error = await copy_file_record(record, target_folder_id)
+            if ok:
+                copied_files += 1
+                if error:
+                    errors.append(error)
+            elif error:
+                errors.append(error)
+        for folder_id in folder_ids:
+            folder = await get_folder(folder_id)
+            if folder is None:
+                raise HTTPException(status_code=404, detail="Folder not found")
+            new_folders, new_files, copy_errors = await copy_folder_tree(folder, target_folder_id)
+            copied_folders += new_folders
+            copied_files += new_files
+            errors.extend(copy_errors)
+        state_changed = copied_files or copied_folders
+
+    if state_changed:
+        await _sse_broadcast({"imported": copied_files + copied_folders, "deleted": 0})
+    return ItemRelocateResponse(
+        ok=True,
+        moved_files=moved_files,
+        moved_folders=moved_folders,
+        copied_files=copied_files,
+        copied_folders=copied_folders,
+        remote_failed=len(errors),
+        errors=errors[:3],
+    )
 
 
 @app.delete("/api/files/{file_id}", response_model=dict)

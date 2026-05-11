@@ -14,8 +14,10 @@ db_module.DB_PATH = Path(tempfile.gettempdir()) / "test_vault_sync.db"
 
 from backend.database import (
     add_deleted_message_id,
+    create_folder,
     delete_files_by_message_ids,
     get_file,
+    get_folder,
     init_db,
     insert_file,
     list_all_message_ids,
@@ -28,6 +30,7 @@ from backend.sync import (
     _import_message,
     _run_sync,
     make_caption,
+    make_folder_caption,
     parse_caption,
 )
 
@@ -244,6 +247,57 @@ async def test_import_message_reuses_existing_folder():
     assert len(files) == 2
 
 
+async def test_sync_folder_caption_merges_existing_path_folder():
+    """A folder created from a file path should be enriched, not duplicated,
+    when the empty-folder metadata message appears later."""
+    file_cap = _make_tg_caption("empty/a.txt", uid="uid-file", file_id="TG_FILE")
+    folder_cap = make_folder_caption(
+        name="empty",
+        path="empty",
+        created_at="2026-01-01T00:00:00+00:00",
+        uid="uid-folder",
+        bot_message_id=8,
+    )
+
+    mock_client = AsyncMock()
+    mock_client.iter_messages = lambda entity: _fake_iter([
+        FakeMessage(id=7, caption=file_cap),
+        FakeMessage(id=8, caption=folder_cap, media=None),
+    ])
+
+    result = await _run_sync(mock_client, object())
+
+    assert result["imported"] == 1
+    folders = await list_folders()
+    assert len(folders) == 1
+    assert folders[0].name == "empty"
+    assert folders[0].uid == "uid-folder"
+    assert folders[0].tg_message_id == 8
+    files = await list_files(folder_id=folders[0].id)
+    assert len(files) == 1
+
+
+async def test_sync_folder_caption_dedups_by_uid():
+    folder_cap = make_folder_caption(
+        name="empty",
+        path="empty",
+        created_at="2026-01-01T00:00:00+00:00",
+        uid="uid-folder",
+        bot_message_id=8,
+    )
+
+    mock_client = AsyncMock()
+    mock_client.iter_messages = lambda entity: _fake_iter([
+        FakeMessage(id=8, caption=folder_cap, media=None),
+        FakeMessage(id=9, caption=folder_cap, media=None),
+    ])
+
+    await _run_sync(mock_client, object())
+    folders = await list_folders()
+    assert len(folders) == 1
+    assert folders[0].uid == "uid-folder"
+
+
 # ---------------------------------------------------------------------------
 # Two-server simulation
 # ---------------------------------------------------------------------------
@@ -425,6 +479,24 @@ async def test_run_sync_deletes_orphaned_records():
     assert len(files) == 2
     names = {f.name for f in files}
     assert "delete.jpg" not in names
+
+
+async def test_run_sync_deletes_orphaned_folder_records():
+    await create_folder(
+        name="gone",
+        parent_id=None,
+        created_at="2026-01-01T00:00:00+00:00",
+        uid="uid-folder-gone",
+        tg_message_id=44,
+    )
+
+    mock_client = AsyncMock()
+    mock_client.iter_messages = lambda entity: _fake_iter([])
+
+    result = await _run_sync(mock_client, object())
+
+    assert result["deleted"] == 1
+    assert await list_folders() == []
 
 
 async def test_run_sync_deleted_field_zero_when_nothing_removed():
