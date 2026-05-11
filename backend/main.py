@@ -21,9 +21,11 @@ from fastapi.staticfiles import StaticFiles
 from .database import (
     add_deleted_message_id,
     bulk_delete_files,
+    close_db,
     create_share,
     delete_share,
     delete_file,
+    delete_file_parts_by_file_ids,
     delete_folders,
     create_folder,
     get_file,
@@ -34,6 +36,8 @@ from .database import (
     get_storage_stats,
     init_db,
     insert_file,
+    insert_file_part,
+    list_file_parts,
     list_files,
     list_files_in_folder_tree,
     list_folder_tree_ids,
@@ -68,14 +72,19 @@ from .models import (
     TelegramSettingsRequest,
     TelegramSettingsResponse,
 )
-from .sync import make_caption, make_folder_caption, start_sync_listener, sync_from_telegram
+from .sync import make_caption, make_folder_caption, make_part_caption, start_sync_listener, sync_from_telegram
 from .telegram import TelegramClient
 
 load_dotenv()
 
-MAX_BYTES = 20 * 1024 * 1024  # 20 MB
+CHUNK_SIZE = 19 * 1024 * 1024  # split files larger than this into parts
+# For channels/groups Bot API message_id == MTProto ID, so the second edit
+# (embedding bot_message_id in caption) is unnecessary. Set TELECLOUD_CHAT_TYPE=channel
+# to skip it and halve upload API calls. Default "private" keeps existing behaviour.
+_CHAT_IS_PRIVATE: bool = os.getenv("TELECLOUD_CHAT_TYPE", "private").strip().lower() != "channel"
 _sse_clients: list[asyncio.Queue] = []
 _sse_shutdown: Optional[asyncio.Event] = None  # set during lifespan shutdown
+_TG_SEM = asyncio.Semaphore(10)
 
 
 def signal_sse_shutdown() -> None:
@@ -200,6 +209,7 @@ def file_response(record) -> FileResponse:
         uploaded_at=record.uploaded_at,
         encrypted=bool(record.encrypted),
         favorite=bool(record.favorite),
+        part_count=record.part_count,
     )
 
 
@@ -234,15 +244,15 @@ async def ensure_folder_telegram_metadata(folder) -> None:
                 await update_folder_metadata(folder.id, uid=uid)
             return
         message_id = await tg.send_message(caption)
-        final_caption = make_folder_caption(
-            name=folder.name,
-            path=path,
-            created_at=folder.created_at.isoformat() if hasattr(folder.created_at, "isoformat") else str(folder.created_at),
-            uid=uid,
-            bot_message_id=message_id,
-            favorite=bool(folder.favorite),
-        )
-        await tg.edit_message_text(message_id, final_caption)
+        if _CHAT_IS_PRIVATE:
+            await tg.edit_message_text(message_id, make_folder_caption(
+                name=folder.name,
+                path=path,
+                created_at=folder.created_at.isoformat() if hasattr(folder.created_at, "isoformat") else str(folder.created_at),
+                uid=uid,
+                bot_message_id=message_id,
+                favorite=bool(folder.favorite),
+            ))
         await update_folder_metadata(folder.id, uid=uid, tg_message_id=message_id)
     except Exception:
         if not folder.uid:
@@ -251,22 +261,27 @@ async def ensure_folder_telegram_metadata(folder) -> None:
 
 async def refresh_folder_tree_captions(folder_id: int) -> list[str]:
     errors: list[str] = []
-    for fid in await list_folder_tree_ids(folder_id):
+
+    async def _refresh_one(fid: int) -> None:
         folder = await get_folder(fid)
         if folder is None:
-            continue
-        try:
-            await ensure_folder_telegram_metadata(folder)
-        except Exception as exc:
-            errors.append(str(exc))
-        for record in await list_files(folder_id=fid):
+            return
+        async with _TG_SEM:
             try:
-                await get_tg_client().edit_message_caption(
-                    record.tg_message_id,
-                    await file_caption_for_record(record),
-                )
+                await ensure_folder_telegram_metadata(folder)
             except Exception as exc:
                 errors.append(str(exc))
+        for record in await list_files(folder_id=fid):
+            async with _TG_SEM:
+                try:
+                    await get_tg_client().edit_message_caption(
+                        record.tg_message_id,
+                        await file_caption_for_record(record),
+                    )
+                except Exception as exc:
+                    errors.append(str(exc))
+
+    await asyncio.gather(*[_refresh_one(fid) for fid in await list_folder_tree_ids(folder_id)])
     return errors
 
 
@@ -307,22 +322,22 @@ async def copy_file_record(record, target_folder_id: Optional[int]) -> tuple[boo
     except Exception as exc:
         return False, None, str(exc)
     error = None
-    final_caption = make_caption(
-        name=caption_name,
-        size=record.size,
-        mime_type=record.mime_type,
-        encrypted=bool(record.encrypted),
-        uploaded_at=uploaded_at,
-        uid=uid,
-        tg_file_id=record.tg_file_id,
-        tg_thumb_file_id=record.tg_thumb_file_id,
-        bot_message_id=message_id,
-        favorite=bool(record.favorite),
-    )
-    try:
-        await get_tg_client().edit_message_caption(message_id, final_caption)
-    except Exception as exc:
-        error = str(exc)
+    if _CHAT_IS_PRIVATE:
+        try:
+            await get_tg_client().edit_message_caption(message_id, make_caption(
+                name=caption_name,
+                size=record.size,
+                mime_type=record.mime_type,
+                encrypted=bool(record.encrypted),
+                uploaded_at=uploaded_at,
+                uid=uid,
+                tg_file_id=record.tg_file_id,
+                tg_thumb_file_id=record.tg_thumb_file_id,
+                bot_message_id=message_id,
+                favorite=bool(record.favorite),
+            ))
+        except Exception as exc:
+            error = str(exc)
     new_id = await insert_file(
         name=record.name,
         size=record.size,
@@ -376,9 +391,19 @@ async def copy_folder_tree(source_folder, target_parent_id: Optional[int]) -> tu
     return copied_folders, copied_files, errors
 
 
-async def download_record_response(record, disposition: str = "attachment") -> Response:
+async def _download_file_content(record) -> bytes:
     tg = get_tg_client()
-    content = await tg.download_file(record.tg_file_id)
+    if record.part_count > 0:
+        parts = await list_file_parts(record.id)
+        chunks = [await tg.download_file(record.tg_file_id)]
+        for part in parts:
+            chunks.append(await tg.download_file(part.tg_file_id))
+        return b"".join(chunks)
+    return await tg.download_file(record.tg_file_id)
+
+
+async def download_record_response(record, disposition: str = "attachment") -> Response:
+    content = await _download_file_content(record)
     media_type = "application/octet-stream" if record.encrypted else (record.mime_type or "application/octet-stream")
     return Response(
         content=content,
@@ -433,6 +458,15 @@ def extract_message_file(message: dict) -> Optional[dict]:
 
 
 async def ingest_telegram_message(tg: TelegramClient, message: dict) -> bool:
+    # Skip messages already created by this app (file, folder, or part captions)
+    cap = message.get("caption") or message.get("text") or ""
+    try:
+        cap_data = json.loads(cap)
+        if isinstance(cap_data, dict) and cap_data.get("v") == 1:
+            return False
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+
     file_info = extract_message_file(message)
     if file_info is None:
         return False
@@ -453,18 +487,18 @@ async def ingest_telegram_message(tg: TelegramClient, message: dict) -> bool:
         message["message_id"],
         caption=caption,
     )
-    final_caption = make_caption(
-        name=file_info["name"],
-        size=file_info["size"],
-        mime_type=file_info["mime_type"],
-        encrypted=False,
-        uploaded_at=now,
-        uid=file_uid,
-        tg_file_id=file_info["file_id"],
-        tg_thumb_file_id=file_info["thumb_file_id"],
-        bot_message_id=channel_message_id,
-    )
-    await tg.edit_message_caption(channel_message_id, final_caption)
+    if _CHAT_IS_PRIVATE:
+        await tg.edit_message_caption(channel_message_id, make_caption(
+            name=file_info["name"],
+            size=file_info["size"],
+            mime_type=file_info["mime_type"],
+            encrypted=False,
+            uploaded_at=now,
+            uid=file_uid,
+            tg_file_id=file_info["file_id"],
+            tg_thumb_file_id=file_info["thumb_file_id"],
+            bot_message_id=channel_message_id,
+        ))
     await insert_file(
         name=file_info["name"],
         size=file_info["size"],
@@ -552,6 +586,7 @@ async def lifespan(app: FastAPI):
             with suppress(asyncio.CancelledError):
                 await app.state.tg_sync_task
         await app.state.tg_client.aclose()
+        await close_db()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -645,7 +680,15 @@ async def api_delete_folder(folder_id: int):
     folder_ids = await list_folder_tree_ids(folder_id)
     tg = get_tg_client()
     remote_errors: list[str] = []
+    file_ids_to_delete = [record.id for record in file_records]
     for record in file_records:
+        if record.part_count > 0:
+            for part in await list_file_parts(record.id):
+                await add_deleted_message_id(part.tg_message_id)
+                try:
+                    await tg.delete_message(part.tg_message_id)
+                except ValueError as exc:
+                    remote_errors.append(str(exc))
         await add_deleted_message_id(record.tg_message_id)
         try:
             await tg.delete_message(record.tg_message_id)
@@ -658,7 +701,8 @@ async def api_delete_folder(folder_id: int):
                 await tg.delete_message(folder_record.tg_message_id)
             except ValueError as exc:
                 remote_errors.append(str(exc))
-    deleted_files = await bulk_delete_files([record.id for record in file_records])
+    await delete_file_parts_by_file_ids(file_ids_to_delete)
+    deleted_files = await bulk_delete_files(file_ids_to_delete)
     deleted_folders = await delete_folders(folder_ids)
     return {
         "ok": True,
@@ -783,11 +827,6 @@ async def api_upload(
     if folder_id is not None and await get_folder(folder_id) is None:
         raise HTTPException(status_code=404, detail="Folder not found")
     content = await file.read()
-    if len(content) > MAX_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File size {len(content) // 1024 // 1024} MB exceeds the 20 MB limit.",
-        )
     tg = get_tg_client()
     stored_mime_type = original_mime_type if encrypted and original_mime_type else (file.content_type or "application/octet-stream")
     now = datetime.now(timezone.utc).isoformat()
@@ -795,49 +834,130 @@ async def api_upload(
     # Build full path for caption so sync can reconstruct folder hierarchy
     caption_name = file.filename
     if folder_id is not None:
-        parts = await get_folder_path(folder_id)
-        if parts:
-            caption_name = "/".join(parts) + "/" + file.filename
-    # Send without bot_message_id first (unknown until after send)
-    caption = make_caption(
-        name=caption_name,
-        size=len(content),
-        mime_type=stored_mime_type,
-        encrypted=encrypted,
-        uploaded_at=now,
-        uid=file_uid,
-    )
-    tg_result = await tg.send_document(
-        file.filename, content, file.content_type or "application/octet-stream",
-        caption=caption,
-    )
-    # Update caption to embed Bot API message_id so any device can delete correctly
-    bot_msg_id = tg_result["message_id"]
-    final_caption = make_caption(
-        name=caption_name,
-        size=len(content),
-        mime_type=stored_mime_type,
-        encrypted=encrypted,
-        uploaded_at=now,
-        uid=file_uid,
-        tg_file_id=tg_result["file_id"],
-        tg_thumb_file_id=tg_result.get("thumb_file_id"),
-        bot_message_id=bot_msg_id,
-    )
-    await tg.edit_message_caption(bot_msg_id, final_caption)
-    thumb_file_id = None if encrypted else tg_result.get("thumb_file_id")
-    new_id = await insert_file(
-        name=file.filename,
-        size=len(content),
-        mime_type=stored_mime_type,
-        tg_file_id=tg_result["file_id"],
-        tg_thumb_file_id=thumb_file_id,
-        tg_message_id=tg_result["message_id"],
-        uploaded_at=now,
-        folder_id=folder_id,
-        encrypted=encrypted,
-        uid=file_uid,
-    )
+        path_parts = await get_folder_path(folder_id)
+        if path_parts:
+            caption_name = "/".join(path_parts) + "/" + file.filename
+
+    if len(content) <= CHUNK_SIZE:
+        # Single-chunk upload
+        caption = make_caption(
+            name=caption_name,
+            size=len(content),
+            mime_type=stored_mime_type,
+            encrypted=encrypted,
+            uploaded_at=now,
+            uid=file_uid,
+        )
+        tg_result = await tg.send_document(
+            file.filename, content, file.content_type or "application/octet-stream",
+            caption=caption,
+        )
+        bot_msg_id = tg_result["message_id"]
+        if _CHAT_IS_PRIVATE:
+            await tg.edit_message_caption(bot_msg_id, make_caption(
+                name=caption_name,
+                size=len(content),
+                mime_type=stored_mime_type,
+                encrypted=encrypted,
+                uploaded_at=now,
+                uid=file_uid,
+                tg_file_id=tg_result["file_id"],
+                tg_thumb_file_id=tg_result.get("thumb_file_id"),
+                bot_message_id=bot_msg_id,
+            ))
+        thumb_file_id = None if encrypted else tg_result.get("thumb_file_id")
+        new_id = await insert_file(
+            name=file.filename,
+            size=len(content),
+            mime_type=stored_mime_type,
+            tg_file_id=tg_result["file_id"],
+            tg_thumb_file_id=thumb_file_id,
+            tg_message_id=bot_msg_id,
+            uploaded_at=now,
+            folder_id=folder_id,
+            encrypted=encrypted,
+            uid=file_uid,
+        )
+    else:
+        # Multipart upload: split into CHUNK_SIZE pieces
+        chunks = [content[i:i + CHUNK_SIZE] for i in range(0, len(content), CHUNK_SIZE)]
+        total_parts = len(chunks)
+
+        # Upload chunk 0 as the main message
+        caption = make_caption(
+            name=caption_name,
+            size=len(content),
+            mime_type=stored_mime_type,
+            encrypted=encrypted,
+            uploaded_at=now,
+            uid=file_uid,
+            part_count=total_parts,
+        )
+        tg_result = await tg.send_document(
+            file.filename, chunks[0], file.content_type or "application/octet-stream",
+            caption=caption,
+        )
+        bot_msg_id = tg_result["message_id"]
+        if _CHAT_IS_PRIVATE:
+            await tg.edit_message_caption(bot_msg_id, make_caption(
+                name=caption_name,
+                size=len(content),
+                mime_type=stored_mime_type,
+                encrypted=encrypted,
+                uploaded_at=now,
+                uid=file_uid,
+                tg_file_id=tg_result["file_id"],
+                tg_thumb_file_id=tg_result.get("thumb_file_id"),
+                bot_message_id=bot_msg_id,
+                part_count=total_parts,
+            ))
+        thumb_file_id = None if encrypted else tg_result.get("thumb_file_id")
+        new_id = await insert_file(
+            name=file.filename,
+            size=len(content),
+            mime_type=stored_mime_type,
+            tg_file_id=tg_result["file_id"],
+            tg_thumb_file_id=thumb_file_id,
+            tg_message_id=bot_msg_id,
+            uploaded_at=now,
+            folder_id=folder_id,
+            encrypted=encrypted,
+            uid=file_uid,
+            part_count=total_parts,
+        )
+
+        # Upload remaining chunks as part messages
+        for part_index, chunk in enumerate(chunks[1:], start=1):
+            part_caption = make_part_caption(
+                file_uid=file_uid,
+                part_index=part_index,
+                total_parts=total_parts,
+                size=len(chunk),
+            )
+            part_result = await tg.send_document(
+                f"{file.filename}.part{part_index}",
+                chunk,
+                "application/octet-stream",
+                caption=part_caption,
+            )
+            part_msg_id = part_result["message_id"]
+            if _CHAT_IS_PRIVATE:
+                await tg.edit_message_caption(part_msg_id, make_part_caption(
+                    file_uid=file_uid,
+                    part_index=part_index,
+                    total_parts=total_parts,
+                    size=len(chunk),
+                    tg_file_id=part_result["file_id"],
+                    bot_message_id=part_msg_id,
+                ))
+            await insert_file_part(
+                file_id=new_id,
+                part_index=part_index,
+                tg_file_id=part_result["file_id"],
+                tg_message_id=part_msg_id,
+                size=len(chunk),
+            )
+
     record = await get_file(new_id)
     return file_response(record)
 
@@ -860,8 +980,7 @@ async def api_preview(file_id: int):
     mime = record.mime_type or ""
     if not (mime.startswith("image/") or mime.startswith("video/") or mime == "application/pdf"):
         raise HTTPException(status_code=415, detail="Preview not supported for this file type")
-    tg = get_tg_client()
-    content = await tg.download_file(record.tg_file_id)
+    content = await _download_file_content(record)
     return Response(
         content=content,
         media_type=mime,
@@ -965,15 +1084,26 @@ async def api_relocate_items(body: ItemRelocateRequest):
     copied_folders = 0
 
     if operation == "move":
+        moved_records: list = []
         for file_id in file_ids:
             record = await update_file_folder(file_id, target_folder_id)
             if record is None:
                 raise HTTPException(status_code=404, detail="File not found")
+            moved_records.append(record)
             moved_files += 1
-            try:
-                await get_tg_client().edit_message_caption(record.tg_message_id, await file_caption_for_record(record))
-            except Exception as exc:
-                errors.append(str(exc))
+
+        async def _edit_moved(rec) -> None:
+            async with _TG_SEM:
+                try:
+                    await get_tg_client().edit_message_caption(
+                        rec.tg_message_id, await file_caption_for_record(rec)
+                    )
+                except Exception as exc:
+                    errors.append(str(exc))
+
+        if moved_records:
+            await asyncio.gather(*[_edit_moved(r) for r in moved_records])
+
         for folder_id in folder_ids:
             folder = await update_folder_parent(folder_id, target_folder_id)
             if folder is None:
@@ -1022,8 +1152,16 @@ async def api_delete(file_id: int):
     if record is None:
         raise HTTPException(status_code=404, detail="File not found")
     tg = get_tg_client()
-    await add_deleted_message_id(record.tg_message_id)
     remote_errors: list[str] = []
+    if record.part_count > 0:
+        for part in await list_file_parts(file_id):
+            await add_deleted_message_id(part.tg_message_id)
+            try:
+                await tg.delete_message(part.tg_message_id)
+            except ValueError as exc:
+                remote_errors.append(str(exc))
+        await delete_file_parts_by_file_ids([file_id])
+    await add_deleted_message_id(record.tg_message_id)
     try:
         await tg.delete_message(record.tg_message_id)
     except ValueError as exc:
@@ -1041,11 +1179,19 @@ async def api_bulk_delete(body: BulkDeleteRequest):
     for fid in body.ids:
         record = await get_file(fid)
         if record:
+            if record.part_count > 0:
+                for part in await list_file_parts(fid):
+                    await add_deleted_message_id(part.tg_message_id)
+                    try:
+                        await tg.delete_message(part.tg_message_id)
+                    except ValueError as exc:
+                        remote_errors.append(str(exc))
             await add_deleted_message_id(record.tg_message_id)
             try:
                 await tg.delete_message(record.tg_message_id)
             except ValueError as exc:
                 remote_errors.append(str(exc))
+    await delete_file_parts_by_file_ids(body.ids)
     deleted = await bulk_delete_files(body.ids)
     return {"deleted": deleted, "remote_failed": len(remote_errors), "errors": remote_errors[:3]}
 
@@ -1056,20 +1202,32 @@ async def api_bulk_download(body: BulkDeleteRequest):
         raise HTTPException(status_code=400, detail="No IDs provided")
 
     tg = get_tg_client()
+    records = []
+    for fid in body.ids:
+        record = await get_file(fid)
+        if record is not None:
+            records.append(record)
+
+    if not records:
+        raise HTTPException(status_code=404, detail="No files found")
+
+    async def _fetch(rec):
+        async with _TG_SEM:
+            if rec.part_count > 0:
+                parts = await list_file_parts(rec.id)
+                chunks = [await tg.download_file(rec.tg_file_id)]
+                for part in parts:
+                    chunks.append(await tg.download_file(part.tg_file_id))
+                return rec, b"".join(chunks)
+            return rec, await tg.download_file(rec.tg_file_id)
+
+    fetched = await asyncio.gather(*[_fetch(r) for r in records])
+
     archive = io.BytesIO()
     used_names: set[str] = set()
-    found = 0
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for fid in body.ids:
-            record = await get_file(fid)
-            if record is None:
-                continue
-            content = await tg.download_file(record.tg_file_id)
-            zf.writestr(zip_entry_name(record.name, used_names), content)
-            found += 1
-
-    if found == 0:
-        raise HTTPException(status_code=404, detail="No files found")
+        for rec, content in fetched:
+            zf.writestr(zip_entry_name(rec.name, used_names), content)
 
     return Response(
         content=archive.getvalue(),

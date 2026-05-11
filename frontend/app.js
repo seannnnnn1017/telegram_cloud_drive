@@ -24,6 +24,8 @@ const state = {
   deleteSelectedBusy: false,
 };
 
+const _downloadingIds = new Set();
+
 function beginTransfer() {
   state.activeTransfers += 1;
 }
@@ -87,12 +89,29 @@ function canUseThumbnail(file) {
   return !file.encrypted && (file.has_thumbnail || mime.startsWith('image/'));
 }
 
+function remoteErrNote(data) {
+  if (!data.remote_failed) return { suffix: '', isErr: false };
+  const raw = data.errors && data.errors.length ? data.errors[0] : '';
+  const detail = raw.replace(/^Telegram \w+ error: /i, '') || `${data.remote_failed} Telegram call(s) failed`;
+  return { suffix: '; ' + detail, isErr: true };
+}
+
 function toast(msg, isErr = false) {
   const el = document.createElement('div');
   el.className = `toast${isErr ? ' err' : ''}`;
-  el.textContent = msg;
+  if (isErr) {
+    const text = document.createElement('span');
+    text.textContent = msg;
+    const btn = document.createElement('button');
+    btn.className = 'toast-close';
+    btn.textContent = '×';
+    btn.onclick = () => el.remove();
+    el.append(text, btn);
+  } else {
+    el.textContent = msg;
+    setTimeout(() => el.remove(), 3000);
+  }
   document.getElementById('toast-area').append(el);
-  setTimeout(() => el.remove(), 3000);
 }
 
 const uploadProgress = new Map();
@@ -272,21 +291,45 @@ document.getElementById('modal-bg').addEventListener('click', (e) => {
 });
 
 async function doDownload(file) {
-  if (file.encrypted) {
-    try {
-      const blob = await decryptedBlob(file);
-      downloadBlob(blob, file.name);
-    } catch (err) {
-      toast(err.message || 'Decrypt failed', true);
-    }
-    return;
-  }
+  if (_downloadingIds.has(file.id)) return;
+  _downloadingIds.add(file.id);
+  const progressId = createUploadProgress(`↓ ${file.name}`);
+  setUploadProgress(progressId, 0);
   beginTransfer();
-  const a = document.createElement('a');
-  a.href = `/api/files/${file.id}/download`;
-  a.download = file.name;
-  a.click();
-  setTimeout(endTransfer, 3000);
+  try {
+    const r = await fetch(`/api/files/${file.id}/download`);
+    if (!r.ok) {
+      let detail = 'Download failed';
+      try { detail = (await r.json()).detail || detail; } catch {}
+      throw new Error(detail);
+    }
+    const total = parseInt(r.headers.get('content-length') || '0');
+    let received = 0;
+    const chunks = [];
+    const reader = r.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (total > 0) setUploadProgress(progressId, received / total * 100);
+    }
+    setUploadProgress(progressId, 100);
+    const buffer = await new Blob(chunks).arrayBuffer();
+    let blob;
+    if (file.encrypted) {
+      blob = await decryptPayload(buffer, file.mime_type);
+    } else {
+      blob = new Blob([buffer], { type: r.headers.get('content-type') || 'application/octet-stream' });
+    }
+    downloadBlob(blob, file.name);
+  } catch (err) {
+    toast(err.message || 'Download failed', true);
+  } finally {
+    finishUploadProgress(progressId);
+    endTransfer();
+    _downloadingIds.delete(file.id);
+  }
 }
 
 async function doDelete(id) {
@@ -297,7 +340,8 @@ async function doDelete(id) {
   finishUploadProgress(progressId);
   if (r.ok) {
     const data = await r.json();
-    toast(data.remote_failed ? 'Deleted locally; Telegram delete needs attention' : 'Deleted');
+    const { suffix: _ds, isErr: _de } = remoteErrNote(data);
+    toast(data.remote_failed ? `Deleted locally${_ds}` : 'Deleted', _de);
     loadFiles();
     loadStorage();
   }
@@ -374,7 +418,8 @@ async function relocateItems(payload, targetFolderId, operation) {
     const changed = operation === 'move'
       ? (data.moved_files || 0) + (data.moved_folders || 0)
       : (data.copied_files || 0) + (data.copied_folders || 0);
-    toast(`${operation === 'move' ? 'Moved' : 'Copied'} ${changed} item(s)${data.remote_failed ? '; remote metadata needs attention' : ''}`, !!data.remote_failed);
+    const { suffix: _rs, isErr: _re } = remoteErrNote(data);
+    toast(`${operation === 'move' ? 'Moved' : 'Copied'} ${changed} item(s)${_rs}`, _re);
     state.selected.clear();
     state.selectedFolders.clear();
     state.folderChildren.clear();
@@ -450,6 +495,11 @@ document.getElementById('bulk-download').onclick = async () => {
   const btn = document.getElementById('bulk-download');
   if (btn.disabled) return;
   const selectedFiles = ids.map(id => state.files.find(f => f.id === id)).filter(Boolean);
+  if (selectedFiles.length === 1 && !selectedFiles[0].encrypted) {
+    btn.disabled = true;
+    try { await doDownload(selectedFiles[0]); } finally { btn.disabled = false; }
+    return;
+  }
   if (selectedFiles.some(file => file.encrypted)) {
     btn.disabled = true;
     try {
@@ -464,6 +514,8 @@ document.getElementById('bulk-download').onclick = async () => {
   btn.disabled = true;
   btn.innerHTML = 'Preparing...';
   beginTransfer();
+  const progressId = createUploadProgress(`↓ ${ids.length} files (zip)`);
+  setUploadProgress(progressId, 0);
   try {
     const r = await fetch('/api/files/bulk-download', {
       method: 'POST',
@@ -475,17 +527,29 @@ document.getElementById('bulk-download').onclick = async () => {
       catch { toast('Download failed', true); }
       return;
     }
-    const blob = await r.blob();
+    const total = parseInt(r.headers.get('content-length') || '0');
+    let received = 0;
+    const chunks = [];
+    const reader = r.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (total > 0) setUploadProgress(progressId, received / total * 100);
+    }
+    setUploadProgress(progressId, 100);
+    const blob = new Blob(chunks, { type: 'application/zip' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = 'vault-selection.zip';
     a.click();
     URL.revokeObjectURL(url);
-    toast(`Downloading ${ids.length} files`);
   } catch {
     toast('Download failed', true);
   } finally {
+    finishUploadProgress(progressId);
     endTransfer();
     btn.disabled = false;
     btn.innerHTML = label;
@@ -519,9 +583,6 @@ document.getElementById('bulk-del').onclick = async () => {
 };
 
 async function uploadFile(file) {
-  const MAX = 20 * 1024 * 1024;
-  if (file.size > MAX) { toast(`${file.name} 超過 20 MB 限制`, true); return; }
-
   const progressId = createUploadProgress(file.name);
 
   const xhr = new XMLHttpRequest();
@@ -677,7 +738,6 @@ function downloadBlob(blob, filename) {
 }
 
 async function uploadFileTracked(file, targetFolderId = state.folderId) {
-  const MAX = 20 * 1024 * 1024;
   let upload;
   beginTransfer();
   try {
@@ -685,11 +745,6 @@ async function uploadFileTracked(file, targetFolderId = state.folderId) {
   } catch {
     endTransfer();
     toast(`${file.name} encryption failed`, true);
-    return false;
-  }
-  if (upload.file.size > MAX) {
-    endTransfer();
-    toast(`${file.name} exceeds the 20 MB limit`, true);
     return false;
   }
 
@@ -1662,7 +1717,8 @@ async function deleteFolder(folder) {
   if (r.ok) {
     const data = await r.json();
     const msg = `Deleted ${data.deleted_folders} folder(s), ${data.deleted_files} file(s)`;
-    toast(data.remote_failed ? `${msg}; ${data.remote_failed} Telegram delete(s) need attention` : msg, !!data.remote_failed);
+    const { suffix: _fds, isErr: _fde } = remoteErrNote(data);
+    toast(`${msg}${_fds}`, _fde);
     state.selected.clear();
     state.selectedFolders.clear();
     if (state.folderId === folder.id || state.folderStack.some(f => f.id === folder.id)) {

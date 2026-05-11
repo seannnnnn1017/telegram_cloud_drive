@@ -17,6 +17,16 @@ class FileRecord(BaseModel):
     encrypted: bool = False
     uid: Optional[str] = None
     favorite: bool = False
+    part_count: int = 0
+
+
+class FilePartRecord(BaseModel):
+    id: int
+    file_id: int
+    part_index: int
+    tg_file_id: str
+    tg_message_id: int
+    size: int
 
 
 class FileResponse(BaseModel):
@@ -29,6 +39,7 @@ class FileResponse(BaseModel):
     uploaded_at: datetime
     encrypted: bool = False
     favorite: bool = False
+    part_count: int = 0
 
 
 class FileUpdateRequest(BaseModel):

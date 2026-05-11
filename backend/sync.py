@@ -7,6 +7,7 @@ from typing import Optional
 
 from .database import (
     create_folder,
+    delete_file_parts_by_message_ids,
     delete_folders_by_message_ids,
     delete_files_by_message_ids,
     get_file_by_message_id,
@@ -17,8 +18,10 @@ from .database import (
     get_folder_by_message_id,
     get_unique_unidentified_folder_by_name,
     insert_file,
+    insert_file_part,
     list_all_folder_message_ids,
     list_all_message_ids,
+    list_all_part_message_ids,
     list_all_uids,
     list_deleted_message_ids,
     remove_deleted_message_ids,
@@ -41,6 +44,7 @@ def make_caption(
     tg_thumb_file_id: Optional[str] = None,
     bot_message_id: Optional[int] = None,
     favorite: bool = False,
+    part_count: int = 0,
 ) -> str:
     data: dict = {
         "v": CAPTION_VERSION,
@@ -59,7 +63,53 @@ def make_caption(
         data["th"] = tg_thumb_file_id
     if bot_message_id is not None:
         data["mid"] = bot_message_id
+    if part_count > 0:
+        data["pc"] = part_count
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def make_part_caption(
+    file_uid: str,
+    part_index: int,
+    total_parts: int,
+    size: int,
+    tg_file_id: Optional[str] = None,
+    bot_message_id: Optional[int] = None,
+) -> str:
+    data: dict = {
+        "v": CAPTION_VERSION,
+        "k": "part",
+        "id": file_uid,
+        "i": part_index,
+        "n": total_parts,
+        "s": size,
+    }
+    if tg_file_id:
+        data["f"] = tg_file_id
+    if bot_message_id is not None:
+        data["mid"] = bot_message_id
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def parse_part_caption(text: str) -> Optional[dict]:
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("v") != CAPTION_VERSION or data.get("k") != "part":
+        return None
+    if not all(k in data for k in ("id", "i", "n", "s")):
+        return None
+    return {
+        "file_uid": data["id"],
+        "part_index": int(data["i"]),
+        "total_parts": int(data["n"]),
+        "size": int(data["s"]),
+        "tg_file_id": data.get("f") or "",
+        "bot_message_id": data.get("mid") or None,
+    }
 
 
 def make_folder_caption(
@@ -109,6 +159,7 @@ def parse_caption(text: str) -> Optional[dict]:
         "uploaded_at": data["t"],
         "bot_message_id": data.get("mid") or None,
         "favorite": bool(data.get("fav", 0)),
+        "part_count": int(data.get("pc", 0)),
     }
 
 
@@ -133,23 +184,29 @@ def parse_folder_caption(text: str) -> Optional[dict]:
     }
 
 
-async def _ensure_sync_folder_path(parts: list[str]) -> int:
+async def _ensure_sync_folder_path(parts: list[str], _fc: Optional[dict] = None) -> int:
     """Get or create the nested folder hierarchy described by *parts*.
 
     Returns the id of the leaf (innermost) folder.
     """
     parent_id: Optional[int] = None
-    for part in parts:
+    for i, part in enumerate(parts):
+        prefix = tuple(parts[: i + 1])
+        if _fc is not None and prefix in _fc:
+            parent_id = _fc[prefix]
+            continue
         folder = await get_folder_by_name(part, parent_id)
         if folder is None:
             now = datetime.now(timezone.utc).isoformat()
             folder_id = await create_folder(name=part, parent_id=parent_id, created_at=now)
             folder = await get_folder(folder_id)
         parent_id = folder.id
+        if _fc is not None:
+            _fc[prefix] = parent_id
     return parent_id  # type: ignore[return-value]
 
 
-async def _import_folder_message(message) -> bool:
+async def _import_folder_message(message, _fc: Optional[dict] = None) -> bool:
     caption = message.message or ""
     parsed = parse_folder_caption(caption)
     if parsed is None:
@@ -160,7 +217,7 @@ async def _import_folder_message(message) -> bool:
     if not parts:
         return False
     *parent_parts, name = parts
-    parent_id = await _ensure_sync_folder_path(parent_parts) if parent_parts else None
+    parent_id = await _ensure_sync_folder_path(parent_parts, _fc) if parent_parts else None
     tg_msg_id = parsed.get("bot_message_id") or message.id
     folder = await get_folder_by_uid(parsed["uid"])
     if folder is None:
@@ -199,19 +256,19 @@ def _split_caption_path(name: str) -> tuple[list[str], str]:
     return parts[:-1], parts[-1]
 
 
-async def _folder_id_for_caption_name(name: str) -> tuple[Optional[int], str]:
+async def _folder_id_for_caption_name(name: str, _fc: Optional[dict] = None) -> tuple[Optional[int], str]:
     folder_parts, raw_name = _split_caption_path(name)
-    folder_id = await _ensure_sync_folder_path(folder_parts) if folder_parts else None
+    folder_id = await _ensure_sync_folder_path(folder_parts, _fc) if folder_parts else None
     return folder_id, raw_name
 
 
-async def _sync_existing_folder_message(message, parsed: dict) -> bool:
+async def _sync_existing_folder_message(message, parsed: dict, _fc: Optional[dict] = None) -> bool:
     raw_path = parsed["path"].strip("/")
     parts = [part for part in raw_path.split("/") if part]
     if not parts:
         return False
     *parent_parts, name = parts
-    parent_id = await _ensure_sync_folder_path(parent_parts) if parent_parts else None
+    parent_id = await _ensure_sync_folder_path(parent_parts, _fc) if parent_parts else None
     tg_msg_id = parsed.get("bot_message_id") or message.id
     folder = await get_folder_by_uid(parsed["uid"])
     if folder is None:
@@ -242,7 +299,7 @@ async def _sync_existing_folder_message(message, parsed: dict) -> bool:
     return changed
 
 
-async def _sync_existing_file_message(message, parsed: dict) -> bool:
+async def _sync_existing_file_message(message, parsed: dict, _fc: Optional[dict] = None) -> bool:
     uid = parsed["uid"]
     tg_msg_id = parsed.get("bot_message_id") or message.id
     record = await get_file_by_uid(uid) if uid else None
@@ -251,7 +308,7 @@ async def _sync_existing_file_message(message, parsed: dict) -> bool:
     if record is None:
         return False
 
-    folder_id, raw_name = await _folder_id_for_caption_name(parsed["name"])
+    folder_id, raw_name = await _folder_id_for_caption_name(parsed["name"], _fc)
     file_id = parsed["tg_file_id"] or record.tg_file_id
     thumb_id = parsed["tg_thumb_file_id"]
     changed = (
@@ -280,6 +337,8 @@ async def _import_message(
     known_uids: Optional[set[str]] = None,
     known_msg_ids: Optional[set[int]] = None,
     deleted_msg_ids: Optional[set[int]] = None,
+    _fc: Optional[dict] = None,
+    _part_buffer: Optional[dict] = None,
 ) -> bool:
     """Try to import a single Telethon message into the DB.
 
@@ -325,14 +384,14 @@ async def _import_message(
     if not file_id:
         return False
 
-    folder_id, raw_name = await _folder_id_for_caption_name(parsed["name"])
+    folder_id, raw_name = await _folder_id_for_caption_name(parsed["name"], _fc)
 
     # Prefer the Bot API message_id embedded in the caption ("mid") so that
     # deleteMessage works correctly from any device (Bot API and MTProto use
     # different message IDs for the same message in private DM chats).
     tg_msg_id = parsed.get("bot_message_id") or message.id
 
-    await insert_file(
+    file_db_id = await insert_file(
         name=raw_name,
         size=parsed["size"],
         mime_type=parsed["mime_type"],
@@ -344,7 +403,18 @@ async def _import_message(
         folder_id=folder_id,
         uid=uid,
         favorite=parsed["favorite"],
+        part_count=parsed["part_count"],
     )
+    if parsed["part_count"] > 0 and uid and _part_buffer and uid in _part_buffer:
+        for part_data in sorted(_part_buffer.pop(uid), key=lambda x: x["part_index"]):
+            part_msg_id = part_data.get("bot_message_id") or part_data.get("mtproto_id", 0)
+            await insert_file_part(
+                file_id=file_db_id,
+                part_index=part_data["part_index"],
+                tg_file_id=part_data["tg_file_id"],
+                tg_message_id=part_msg_id,
+                size=part_data["size"],
+            )
     if uid:
         known_uids.add(uid)
     known_msg_ids.add(message.id)
@@ -359,6 +429,7 @@ async def _run_sync(client, chat_entity) -> dict:
     # Snapshot of DB state before the scan — used to detect orphaned records
     db_msg_ids = await list_all_message_ids()
     db_folder_msg_ids = await list_all_folder_message_ids()
+    db_part_msg_ids = await list_all_part_message_ids()
     known_uids = await list_all_uids()
     known_msg_ids = set(db_msg_ids)  # mutable copy for import dedup
     deleted_msg_ids = await list_deleted_message_ids()  # tombstones — never re-import
@@ -373,15 +444,29 @@ async def _run_sync(client, chat_entity) -> dict:
     skipped_no_caption = 0
     total_seen = 0
     telegram_msg_ids: set[int] = set()
+    _fc: dict = {}  # folder-path cache: tuple(parts) → folder_id
+    _part_buffer: dict[str, list[dict]] = {}  # file_uid → list of parsed part data
 
     async for message in client.iter_messages(chat_entity):
         total_seen += 1
+
+        caption = message.message or ""
+
+        # Check for part messages before regular captions — parts have k="part"
+        part_parsed = parse_part_caption(caption)
+        if part_parsed is not None:
+            effective_id = part_parsed.get("bot_message_id") or message.id
+            telegram_msg_ids.add(effective_id)
+            _part_buffer.setdefault(part_parsed["file_uid"], []).append({
+                **part_parsed,
+                "mtproto_id": message.id,
+            })
+            continue
 
         # Parse caption early so we can use the embedded Bot API message_id ("mid")
         # for ID-space-consistent comparisons with db_msg_ids.
         # In private DM chats, message.id (MTProto) ≠ Bot API message_id — using
         # the "mid" field normalises both sides to the same ID space.
-        caption = message.message or ""
         parsed = parse_caption(caption)
         folder_parsed = parse_folder_caption(caption)
         effective_id = (parsed or folder_parsed or {}).get("bot_message_id") or message.id
@@ -392,9 +477,9 @@ async def _run_sync(client, chat_entity) -> dict:
             continue
 
         if parsed is None:
-            if folder_parsed and await _sync_existing_folder_message(message, folder_parsed):
+            if folder_parsed and await _sync_existing_folder_message(message, folder_parsed, _fc):
                 updated += 1
-            elif await _import_folder_message(message):
+            elif await _import_folder_message(message, _fc):
                 imported += 1
             else:
                 skipped_no_caption += 1
@@ -402,18 +487,18 @@ async def _run_sync(client, chat_entity) -> dict:
 
         uid = parsed["uid"]
         if uid and uid in known_uids:
-            if await _sync_existing_file_message(message, parsed):
+            if await _sync_existing_file_message(message, parsed, _fc):
                 updated += 1
             skipped_exists += 1
             continue
 
         if effective_id in known_msg_ids:
-            if await _sync_existing_file_message(message, parsed):
+            if await _sync_existing_file_message(message, parsed, _fc):
                 updated += 1
             skipped_exists += 1
             continue
 
-        did_import = await _import_message(message, known_uids, known_msg_ids, deleted_msg_ids)
+        did_import = await _import_message(message, known_uids, known_msg_ids, deleted_msg_ids, _fc, _part_buffer)
         if did_import:
             imported += 1
         else:
@@ -425,6 +510,8 @@ async def _run_sync(client, chat_entity) -> dict:
     deleted_files = await delete_files_by_message_ids(orphaned)
     orphaned_folders = db_folder_msg_ids - telegram_msg_ids - deleted_msg_ids
     deleted_folders = await delete_folders_by_message_ids(orphaned_folders)
+    orphaned_parts = db_part_msg_ids - telegram_msg_ids - deleted_msg_ids
+    await delete_file_parts_by_message_ids(orphaned_parts)
     deleted = deleted_files + deleted_folders
     if deleted:
         log.warning(

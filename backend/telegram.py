@@ -121,23 +121,21 @@ class TelegramClient:
         }
         if caption is not None:
             payload["caption"] = caption
-        r = await self._client.post(
+        r, data = await self._post_with_retry(
             f"{self._api}/copyMessage",
             json=payload,
             timeout=60.0,
         )
-        data = r.json()
         if not data.get("ok"):
             raise ValueError(f"Telegram error {r.status_code}: {data.get('description', 'unknown error')}")
         return data["result"]["message_id"]
 
     async def send_message(self, text: str) -> int:
-        r = await self._client.post(
+        r, data = await self._post_with_retry(
             f"{self._api}/sendMessage",
             json={"chat_id": self._chat_id, "text": text},
             timeout=10.0,
         )
-        data = r.json()
         if not data.get("ok"):
             raise ValueError(f"Telegram sendMessage error: {data.get('description', 'unknown error')}")
         return data["result"]["message_id"]
@@ -151,12 +149,11 @@ class TelegramClient:
     async def delete_message(self, message_id: int) -> None:
         import logging
         log = logging.getLogger("telecloud.telegram")
-        r = await self._client.post(
+        r, data = await self._post_with_retry(
             f"{self._api}/deleteMessage",
             json={"chat_id": self._chat_id, "message_id": message_id},
             timeout=10.0,
         )
-        data = r.json()
         log.warning(
             "deleteMessage chat_id=%s message_id=%s → ok=%s desc=%r",
             self._chat_id, message_id, data.get("ok"), data.get("description"),
@@ -169,21 +166,19 @@ class TelegramClient:
             raise ValueError(f"Telegram deleteMessage failed: {desc}")
 
     async def edit_message_caption(self, message_id: int, caption: str) -> None:
-        r = await self._client.post(
+        r, data = await self._post_with_retry(
             f"{self._api}/editMessageCaption",
             json={"chat_id": self._chat_id, "message_id": message_id, "caption": caption},
             timeout=10.0,
         )
-        data = r.json()
         if not data.get("ok"):
             raise ValueError(f"Telegram editMessageCaption error: {data.get('description', 'unknown error')}")
 
     async def edit_message_text(self, message_id: int, text: str) -> None:
-        r = await self._client.post(
+        r, data = await self._post_with_retry(
             f"{self._api}/editMessageText",
             json={"chat_id": self._chat_id, "message_id": message_id, "text": text},
             timeout=10.0,
         )
-        data = r.json()
         if not data.get("ok"):
             raise ValueError(f"Telegram editMessageText error: {data.get('description', 'unknown error')}")
