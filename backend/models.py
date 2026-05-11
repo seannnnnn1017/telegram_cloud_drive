@@ -146,6 +146,7 @@ class SyncSettingsResponse(BaseModel):
 class SyncResponse(BaseModel):
     ok: bool
     imported: int
+    updated: int = 0
     skipped_exists: int
     skipped_no_caption: int
     deleted: int = 0

@@ -9,6 +9,8 @@ from .database import (
     create_folder,
     delete_folders_by_message_ids,
     delete_files_by_message_ids,
+    get_file_by_message_id,
+    get_file_by_uid,
     get_folder,
     get_folder_by_name,
     get_folder_by_uid,
@@ -19,8 +21,10 @@ from .database import (
     list_all_uids,
     list_deleted_message_ids,
     remove_deleted_message_ids,
+    update_file_sync_metadata,
     update_folder_favorite,
     update_folder_metadata,
+    update_folder_sync_metadata,
 )
 
 CAPTION_VERSION = 1
@@ -186,6 +190,87 @@ async def _import_folder_message(message) -> bool:
     return True
 
 
+def _split_caption_path(name: str) -> tuple[list[str], str]:
+    parts = [part for part in name.split("/") if part]
+    if not parts:
+        return [], name
+    return parts[:-1], parts[-1]
+
+
+async def _folder_id_for_caption_name(name: str) -> tuple[Optional[int], str]:
+    folder_parts, raw_name = _split_caption_path(name)
+    folder_id = await _ensure_sync_folder_path(folder_parts) if folder_parts else None
+    return folder_id, raw_name
+
+
+async def _sync_existing_folder_message(message, parsed: dict) -> bool:
+    raw_path = parsed["path"].strip("/")
+    parts = [part for part in raw_path.split("/") if part]
+    if not parts:
+        return False
+    *parent_parts, name = parts
+    parent_id = await _ensure_sync_folder_path(parent_parts) if parent_parts else None
+    tg_msg_id = parsed.get("bot_message_id") or message.id
+    folder = await get_folder_by_uid(parsed["uid"])
+    if folder is None:
+        folder = await get_folder_by_message_id(tg_msg_id)
+    if folder is None:
+        folder = await get_folder_by_name(name, parent_id)
+    if folder is None:
+        return False
+
+    changed = (
+        folder.name != name
+        or folder.parent_id != parent_id
+        or folder.uid != parsed["uid"]
+        or folder.tg_message_id != tg_msg_id
+        or bool(folder.favorite) != parsed["favorite"]
+    )
+    if changed:
+        await update_folder_sync_metadata(
+            folder.id,
+            name=name,
+            parent_id=parent_id,
+            uid=parsed["uid"],
+            tg_message_id=tg_msg_id,
+            favorite=parsed["favorite"],
+        )
+    return changed
+
+
+async def _sync_existing_file_message(message, parsed: dict) -> bool:
+    uid = parsed["uid"]
+    tg_msg_id = parsed.get("bot_message_id") or message.id
+    record = await get_file_by_uid(uid) if uid else None
+    if record is None:
+        record = await get_file_by_message_id(tg_msg_id)
+    if record is None:
+        return False
+
+    folder_id, raw_name = await _folder_id_for_caption_name(parsed["name"])
+    file_id = parsed["tg_file_id"] or record.tg_file_id
+    thumb_id = parsed["tg_thumb_file_id"]
+    changed = (
+        record.name != raw_name
+        or record.folder_id != folder_id
+        or record.tg_file_id != file_id
+        or record.tg_thumb_file_id != thumb_id
+        or record.tg_message_id != tg_msg_id
+        or bool(record.favorite) != parsed["favorite"]
+    )
+    if changed:
+        await update_file_sync_metadata(
+            record.id,
+            name=raw_name,
+            folder_id=folder_id,
+            tg_file_id=file_id,
+            tg_thumb_file_id=thumb_id,
+            tg_message_id=tg_msg_id,
+            favorite=parsed["favorite"],
+        )
+    return changed
+
+
 async def _import_message(
     message,
     known_uids: Optional[set[str]] = None,
@@ -236,11 +321,7 @@ async def _import_message(
     if not file_id:
         return False
 
-    raw_name = parsed["name"]
-    folder_id: Optional[int] = None
-    if "/" in raw_name:
-        *folder_parts, raw_name = raw_name.split("/")
-        folder_id = await _ensure_sync_folder_path(folder_parts)
+    folder_id, raw_name = await _folder_id_for_caption_name(parsed["name"])
 
     # Prefer the Bot API message_id embedded in the caption ("mid") so that
     # deleteMessage works correctly from any device (Bot API and MTProto use
@@ -283,6 +364,7 @@ async def _run_sync(client, chat_entity) -> dict:
     log.warning("sync: entity id=%s name=%r type=%s", eid, ename, type(chat_entity).__name__)
 
     imported = 0
+    updated = 0
     skipped_exists = 0
     skipped_no_caption = 0
     total_seen = 0
@@ -305,13 +387,10 @@ async def _run_sync(client, chat_entity) -> dict:
         if effective_id in deleted_msg_ids:
             continue
 
-        # Quick pre-filter by message_id
-        if effective_id in known_msg_ids:
-            skipped_exists += 1
-            continue
-
         if parsed is None:
-            if await _import_folder_message(message):
+            if folder_parsed and await _sync_existing_folder_message(message, folder_parsed):
+                updated += 1
+            elif await _import_folder_message(message):
                 imported += 1
             else:
                 skipped_no_caption += 1
@@ -319,6 +398,14 @@ async def _run_sync(client, chat_entity) -> dict:
 
         uid = parsed["uid"]
         if uid and uid in known_uids:
+            if await _sync_existing_file_message(message, parsed):
+                updated += 1
+            skipped_exists += 1
+            continue
+
+        if effective_id in known_msg_ids:
+            if await _sync_existing_file_message(message, parsed):
+                updated += 1
             skipped_exists += 1
             continue
 
@@ -348,12 +435,13 @@ async def _run_sync(client, chat_entity) -> dict:
     await remove_deleted_message_ids(confirmed_gone)
 
     log.warning(
-        "sync: done — total_seen=%s imported=%s deleted=%s skipped_exists=%s skipped_no_caption=%s",
-        total_seen, imported, deleted, skipped_exists, skipped_no_caption,
+        "sync: done — total_seen=%s imported=%s updated=%s deleted=%s skipped_exists=%s skipped_no_caption=%s",
+        total_seen, imported, updated, deleted, skipped_exists, skipped_no_caption,
     )
     return {
         "ok": True,
         "imported": imported,
+        "updated": updated,
         "deleted": deleted,
         "skipped_exists": skipped_exists,
         "skipped_no_caption": skipped_no_caption,
@@ -518,7 +606,7 @@ async def start_sync_listener(on_change=None) -> None:
     - MessageDeleted → remove from local DB
 
     *on_change* is an optional async callable invoked with a result dict
-    ``{"imported": N, "deleted": M}`` whenever the local DB changes.
+    ``{"imported": N, "updated": N, "deleted": M}`` whenever the local DB changes.
 
     Runs until the asyncio task is cancelled (e.g. on server shutdown).
     """
@@ -539,7 +627,11 @@ async def start_sync_listener(on_change=None) -> None:
         return
 
     async def _notify(result: dict) -> None:
-        if on_change and (result.get("imported", 0) > 0 or result.get("deleted", 0) > 0):
+        if on_change and (
+            result.get("imported", 0) > 0
+            or result.get("updated", 0) > 0
+            or result.get("deleted", 0) > 0
+        ):
             try:
                 await on_change(result)
             except Exception as exc:
@@ -556,8 +648,8 @@ async def start_sync_listener(on_change=None) -> None:
         # Initial history scan
         result = await _run_sync(client, chat_entity)
         log.warning(
-            "sync listener startup: imported=%s deleted=%s",
-            result["imported"], result["deleted"],
+            "sync listener startup: imported=%s updated=%s deleted=%s",
+            result["imported"], result.get("updated", 0), result["deleted"],
         )
         await _notify(result)
 

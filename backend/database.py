@@ -129,10 +129,56 @@ async def get_file(file_id: int) -> Optional[FileRecord]:
             return FileRecord(**dict(row)) if row else None
 
 
+async def get_file_by_uid(uid: str) -> Optional[FileRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM files WHERE uid = ?", (uid,)) as cur:
+            row = await cur.fetchone()
+            return FileRecord(**dict(row)) if row else None
+
+
+async def get_file_by_message_id(tg_message_id: int) -> Optional[FileRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM files WHERE tg_message_id = ?", (tg_message_id,)) as cur:
+            row = await cur.fetchone()
+            return FileRecord(**dict(row)) if row else None
+
+
 async def update_file_name(file_id: int, name: str) -> Optional[FileRecord]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("UPDATE files SET name = ? WHERE id = ?", (name, file_id))
+        if cur.rowcount == 0:
+            await db.commit()
+            return None
+        await db.commit()
+        async with db.execute("SELECT * FROM files WHERE id = ?", (file_id,)) as get_cur:
+            row = await get_cur.fetchone()
+            return FileRecord(**dict(row)) if row else None
+
+
+async def update_file_sync_metadata(
+    file_id: int,
+    *,
+    name: str,
+    folder_id: Optional[int],
+    tg_file_id: str,
+    tg_thumb_file_id: Optional[str],
+    tg_message_id: int,
+    favorite: bool,
+) -> Optional[FileRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            UPDATE files
+            SET name = ?, folder_id = ?, tg_file_id = ?, tg_thumb_file_id = ?,
+                tg_message_id = ?, favorite = ?
+            WHERE id = ?
+            """,
+            (name, folder_id, tg_file_id, tg_thumb_file_id, tg_message_id, int(favorite), file_id),
+        )
         if cur.rowcount == 0:
             await db.commit()
             return None
@@ -293,6 +339,34 @@ async def update_folder_parent(folder_id: int, parent_id: Optional[int]) -> Opti
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("UPDATE folders SET parent_id = ? WHERE id = ?", (parent_id, folder_id))
+        if cur.rowcount == 0:
+            await db.commit()
+            return None
+        await db.commit()
+        async with db.execute("SELECT * FROM folders WHERE id = ?", (folder_id,)) as get_cur:
+            row = await get_cur.fetchone()
+            return FolderRecord(**dict(row)) if row else None
+
+
+async def update_folder_sync_metadata(
+    folder_id: int,
+    *,
+    name: str,
+    parent_id: Optional[int],
+    uid: str,
+    tg_message_id: int,
+    favorite: bool,
+) -> Optional[FolderRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            UPDATE folders
+            SET name = ?, parent_id = ?, uid = ?, tg_message_id = ?, favorite = ?
+            WHERE id = ?
+            """,
+            (name, parent_id, uid, tg_message_id, int(favorite), folder_id),
+        )
         if cur.rowcount == 0:
             await db.commit()
             return None

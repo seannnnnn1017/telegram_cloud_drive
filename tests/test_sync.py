@@ -361,6 +361,77 @@ async def test_two_server_no_duplicates_on_repeated_sync():
     assert len(await list_files()) == 1
 
 
+async def test_sync_existing_uid_updates_file_location():
+    await insert_file(
+        "move.txt",
+        100,
+        "text/plain",
+        "TG_MOVE",
+        60,
+        "2026-01-01T00:00:00+00:00",
+        uid="uid-move",
+    )
+    caption = _make_tg_caption("docs/move.txt", uid="uid-move", file_id="TG_MOVE")
+
+    mock_client = AsyncMock()
+    mock_client.iter_messages = lambda entity: _fake_iter([FakeMessage(id=60, caption=caption)])
+
+    result = await _run_sync(mock_client, object())
+
+    assert result["imported"] == 0
+    assert result["updated"] == 1
+    root_files = await list_files()
+    folders = await list_folders()
+    assert root_files == []
+    assert len(folders) == 1 and folders[0].name == "docs"
+    moved_files = await list_files(folder_id=folders[0].id)
+    assert len(moved_files) == 1
+    assert moved_files[0].name == "move.txt"
+
+
+async def test_sync_existing_folder_uid_updates_location():
+    folder_id = await create_folder(
+        name="Project",
+        parent_id=None,
+        created_at="2026-01-01T00:00:00+00:00",
+        uid="uid-project",
+        tg_message_id=80,
+    )
+    dest_id = await create_folder(
+        name="Archive",
+        parent_id=None,
+        created_at="2026-01-01T00:00:00+00:00",
+        uid="uid-archive",
+        tg_message_id=81,
+    )
+    caption = make_folder_caption(
+        name="Project",
+        path="Archive/Project",
+        created_at="2026-01-01T00:00:00+00:00",
+        uid="uid-project",
+        bot_message_id=80,
+    )
+    archive_caption = make_folder_caption(
+        name="Archive",
+        path="Archive",
+        created_at="2026-01-01T00:00:00+00:00",
+        uid="uid-archive",
+        bot_message_id=81,
+    )
+
+    mock_client = AsyncMock()
+    mock_client.iter_messages = lambda entity: _fake_iter([
+        FakeMessage(id=81, caption=archive_caption, media=None),
+        FakeMessage(id=80, caption=caption, media=None),
+    ])
+
+    result = await _run_sync(mock_client, object())
+
+    assert result["updated"] == 1
+    folder = await get_folder(folder_id)
+    assert folder.parent_id == dest_id
+
+
 async def test_two_server_sync_with_folder_structure():
     """
     Server A uploads 'photos/trip/beach.jpg'.

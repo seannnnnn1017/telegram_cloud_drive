@@ -2131,11 +2131,12 @@ document.getElementById('sync-btn').onclick = async () => {
     }
     const parts = [];
     if (data.imported > 0) parts.push(`匯入 ${data.imported} 個`);
+    if (data.updated > 0) parts.push(`更新 ${data.updated} 個`);
     if (data.deleted > 0) parts.push(`刪除 ${data.deleted} 個`);
     if (parts.length === 0) parts.push('無變更');
     toast(`同步完成：${parts.join('，')}`);
     document.getElementById('sync-status').textContent = `同步完成 · ${parts.join('，')}`;
-    if (data.imported > 0 || data.deleted > 0) { loadFiles(); loadStorage(); }
+    if (data.imported > 0 || data.updated > 0 || data.deleted > 0) { loadFiles(); loadStorage(); }
   } catch {
     toast('同步失敗：網路錯誤', true);
     document.getElementById('sync-status').textContent = '同步失敗';
@@ -2158,12 +2159,12 @@ document.addEventListener('keydown', (e) => {
 loadFiles();
 loadStorage();
 
-// SSE — auto-refresh when the sync listener imports or deletes files
+// SSE — auto-refresh when the sync listener imports, updates, or deletes files
 (function connectSSE() {
   const es = new EventSource('/api/events');
   es.addEventListener('sync', (e) => {
     const data = JSON.parse(e.data);
-    if (data.imported > 0 || data.deleted > 0) {
+    if (data.imported > 0 || data.updated > 0 || data.deleted > 0) {
       loadFiles();
       loadStorage();
     }

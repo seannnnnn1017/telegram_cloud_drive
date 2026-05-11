@@ -1182,7 +1182,7 @@ async def api_events(request: Request):
 async def api_sync():
     try:
         result = await sync_from_telegram()
-        if result.get("imported", 0) > 0 or result.get("deleted", 0) > 0:
+        if result.get("imported", 0) > 0 or result.get("updated", 0) > 0 or result.get("deleted", 0) > 0:
             asyncio.create_task(_sse_broadcast(result))
         return SyncResponse(**result)
     except (ValueError, RuntimeError) as exc:
