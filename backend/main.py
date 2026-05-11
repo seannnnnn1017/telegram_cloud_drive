@@ -100,6 +100,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 folder_ensure_lock = asyncio.Lock()
 
 
+class NoCacheStaticFiles(StaticFiles):
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        return response
+
+
 def zip_entry_name(filename: str, used_names: set[str]) -> str:
     safe_name = (filename or "file").replace("\\", "/").split("/")[-1] or "file"
     if safe_name not in used_names:
@@ -1191,4 +1198,4 @@ async def api_sync():
         raise HTTPException(status_code=500, detail=f"同步失敗：{exc}") from exc
 
 
-app.mount("/", StaticFiles(directory=PROJECT_ROOT / "frontend", html=True), name="static")
+app.mount("/", NoCacheStaticFiles(directory=PROJECT_ROOT / "frontend", html=True), name="static")
