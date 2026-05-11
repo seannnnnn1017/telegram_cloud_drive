@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import webbrowser
+from contextlib import suppress
 from pathlib import Path
 
 import httpx
@@ -317,7 +318,13 @@ async def run_server(args: argparse.Namespace) -> int:
     label = f" ({args.label})" if args.label else ""
     print(f"telecloud{label}: {url}", flush=True)
 
-    config = uvicorn.Config(app, host=bind_host, port=port, log_level=os.getenv("TELECLOUD_LOG_LEVEL", "info"))
+    config = uvicorn.Config(
+        app,
+        host=bind_host,
+        port=port,
+        log_level=os.getenv("TELECLOUD_LOG_LEVEL", "info"),
+        timeout_graceful_shutdown=3,
+    )
     server = uvicorn.Server(config)
     watchdog = asyncio.create_task(idle_watchdog(server, app, idle_timeout))
     if not args.no_browser:
@@ -326,7 +333,8 @@ async def run_server(args: argparse.Namespace) -> int:
         await server.serve()
     finally:
         watchdog.cancel()
-        await asyncio.gather(watchdog, return_exceptions=True)
+        with suppress(asyncio.CancelledError):
+            await watchdog
     return 0
 
 
@@ -550,18 +558,21 @@ async def run_sync_auth(argv: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    if argv is None:
-        argv = sys.argv[1:]
-    if argv and argv[0] == "sync-auth":
-        return asyncio.run(run_sync_auth(argv[1:]))
-    if argv and argv[0] == "backfill-captions":
-        return asyncio.run(run_backfill_captions(argv[1:]))
-    if argv and argv[0] == "inspect-messages":
-        return asyncio.run(run_inspect_messages(argv[1:]))
-    args = parse_args(argv)
-    if args.server:
-        return spawn_servers(args)
-    return asyncio.run(run_server(args))
+    try:
+        if argv is None:
+            argv = sys.argv[1:]
+        if argv and argv[0] == "sync-auth":
+            return asyncio.run(run_sync_auth(argv[1:]))
+        if argv and argv[0] == "backfill-captions":
+            return asyncio.run(run_backfill_captions(argv[1:]))
+        if argv and argv[0] == "inspect-messages":
+            return asyncio.run(run_inspect_messages(argv[1:]))
+        args = parse_args(argv)
+        if args.server:
+            return spawn_servers(args)
+        return asyncio.run(run_server(args))
+    except KeyboardInterrupt:
+        return 130
 
 
 if __name__ == "__main__":

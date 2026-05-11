@@ -26,6 +26,16 @@ def test_parse_defaults():
     assert args.no_browser is False
 
 
+def test_main_handles_keyboard_interrupt(monkeypatch):
+    def raise_keyboard_interrupt(_coro):
+        _coro.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_module.asyncio, "run", raise_keyboard_interrupt)
+
+    assert cli_module.main(["--no-browser"]) == 130
+
+
 def test_parse_share_base_url():
     args = parse_args(["--share-base-url", "http://localhost:8000"])
     assert args.share_base_url == "http://localhost:8000"

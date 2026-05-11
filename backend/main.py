@@ -74,6 +74,15 @@ _sse_clients: list[asyncio.Queue] = []
 _sse_shutdown: Optional[asyncio.Event] = None  # set during lifespan shutdown
 
 
+def signal_sse_shutdown() -> None:
+    """Ask active SSE streams to close so server shutdown is not held open."""
+    if _sse_shutdown is not None:
+        _sse_shutdown.set()
+    for q in list(_sse_clients):
+        with suppress(Exception):
+            q.put_nowait(None)  # None = shutdown sentinel
+
+
 async def _sse_broadcast(data: dict) -> None:
     if not _sse_clients:
         return
@@ -381,6 +390,7 @@ async def poll_telegram_uploads(tg: TelegramClient) -> None:
 async def lifespan(app: FastAPI):
     global _sse_shutdown
     _sse_shutdown = asyncio.Event()
+    app.state.shutdown_requested = False
     await init_db()
     app.state.tg_client = build_tg_client()
     app.state.tg_poll_task = None
@@ -394,11 +404,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # Signal all SSE connections to close before uvicorn waits on them
-        _sse_shutdown.set()
-        for q in list(_sse_clients):
-            with suppress(Exception):
-                q.put_nowait(None)  # None = shutdown sentinel
+        signal_sse_shutdown()
         if app.state.tg_poll_task is not None:
             app.state.tg_poll_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -623,6 +629,7 @@ async def api_update_server_settings(body: ServerSettingsRequest):
 @app.post("/api/server/shutdown", response_model=dict)
 async def api_shutdown_server():
     app.state.shutdown_requested = True
+    signal_sse_shutdown()
     return {"ok": True}
 
 
@@ -934,6 +941,8 @@ async def api_events(request: Request):
         try:
             yield ": connected\n\n"
             while True:
+                if getattr(app.state, "shutdown_requested", False):
+                    break
                 if await request.is_disconnected():
                     break
                 try:

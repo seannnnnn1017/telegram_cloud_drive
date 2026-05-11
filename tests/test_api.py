@@ -515,6 +515,25 @@ async def test_shutdown_server_sets_flag(client):
     app.state.shutdown_requested = False
 
 
+async def test_shutdown_server_signals_sse_clients(client):
+    from backend.main import _sse_clients
+
+    q = asyncio.Queue()
+    _sse_clients.append(q)
+    app.state.shutdown_requested = False
+
+    try:
+        async with client as c:
+            r = await c.post("/api/server/shutdown")
+
+        assert r.status_code == 200
+        assert await asyncio.wait_for(q.get(), timeout=1) is None
+    finally:
+        if q in _sse_clients:
+            _sse_clients.remove(q)
+        app.state.shutdown_requested = False
+
+
 async def test_share_link_expiry(mock_tg, client):
     async with client as c:
         up = await c.post("/api/upload", files={"file": ("expired.txt", b"d", "text/plain")})

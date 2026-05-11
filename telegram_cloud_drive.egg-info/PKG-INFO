@@ -94,6 +94,37 @@ telecloud --server personal=.env --server work=.env.work
 | 搜尋 | 即時搜尋檔名 |
 | 排序 | 點擊欄位標題（名稱 / 類型 / 時間 / 大小） |
 | 多選 | 勾選 checkbox → 批次刪除 |
+| 跨裝置同步 | 掃描 Telegram 頻道歷史，將其他裝置上傳的檔案匯入本機資料庫 |
+
+## 跨裝置同步
+
+每台電腦各自維護一份本機 SQLite 資料庫（`vault.db`）。上傳時，telecloud 會把完整 metadata 寫入 Telegram 訊息 caption；同步時透過 MTProto API 掃描頻道歷史，把缺少的記錄補回本機。
+
+### 設定步驟（每台電腦一次性）
+
+**Step 1 — 取得 Telegram API 憑證**
+
+前往 [my.telegram.org](https://my.telegram.org)，登入後點 **API development tools**，建立一個 App（Platform 選 Other），取得：
+- **App api_id**（數字）
+- **App api_hash**（英數字串）
+
+**Step 2 — 填入設定**
+
+開啟 telecloud 網頁介面 → 右上角齒輪 → 「跨裝置同步」區塊，填入 API ID 與 API Hash 後儲存。
+
+**Step 3 — 完成使用者帳號認證**
+
+```bash
+telecloud sync-auth
+```
+
+依照提示輸入手機號碼與 Telegram 傳來的 OTP 驗證碼。認證成功後，session 會自動存入 `.env`，之後同步無需再驗證。
+
+**Step 4 — 同步**
+
+點擊 Web UI header 的 **⟳ 按鈕**，telecloud 會掃描頻道歷史並匯入缺少的檔案。
+
+> **注意**：只有本次更新後上傳的新檔案才帶有 metadata caption；舊訊息無 caption 會被跳過。
 
 ## 安全說明
 
