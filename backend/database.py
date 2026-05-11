@@ -299,6 +299,24 @@ async def get_folder_by_message_id(tg_message_id: int) -> Optional[FolderRecord]
             return FolderRecord(**dict(row)) if row else None
 
 
+async def get_unique_unidentified_folder_by_name(name: str) -> Optional[FolderRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT * FROM folders
+            WHERE name = ? AND uid IS NULL AND tg_message_id IS NULL
+            ORDER BY id ASC
+            LIMIT 2
+            """,
+            (name,),
+        ) as cur:
+            rows = await cur.fetchall()
+            if len(rows) != 1:
+                return None
+            return FolderRecord(**dict(rows[0]))
+
+
 async def update_folder_metadata(folder_id: int, uid: Optional[str] = None, tg_message_id: Optional[int] = None) -> Optional[FolderRecord]:
     sets, params = [], []
     if uid is not None:

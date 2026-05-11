@@ -432,6 +432,54 @@ async def test_sync_existing_folder_uid_updates_location():
     assert folder.parent_id == dest_id
 
 
+async def test_sync_adopts_unidentified_folder_instead_of_creating_duplicate_on_move():
+    folder_id = await create_folder(
+        name="Project",
+        parent_id=None,
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+    dest_id = await create_folder(
+        name="Archive",
+        parent_id=None,
+        created_at="2026-01-01T00:00:00+00:00",
+        uid="uid-archive",
+        tg_message_id=81,
+    )
+    caption = make_folder_caption(
+        name="Project",
+        path="Archive/Project",
+        created_at="2026-01-01T00:00:00+00:00",
+        uid="uid-project",
+        bot_message_id=80,
+    )
+    archive_caption = make_folder_caption(
+        name="Archive",
+        path="Archive",
+        created_at="2026-01-01T00:00:00+00:00",
+        uid="uid-archive",
+        bot_message_id=81,
+    )
+
+    mock_client = AsyncMock()
+    mock_client.iter_messages = lambda entity: _fake_iter([
+        FakeMessage(id=81, caption=archive_caption, media=None),
+        FakeMessage(id=80, caption=caption, media=None),
+    ])
+
+    result = await _run_sync(mock_client, object())
+
+    assert result["imported"] == 0
+    assert result["updated"] == 1
+    folder = await get_folder(folder_id)
+    assert folder.parent_id == dest_id
+    assert folder.uid == "uid-project"
+    assert folder.tg_message_id == 80
+    root_folders = await list_folders()
+    archive_children = await list_folders(parent_id=dest_id)
+    assert [f.name for f in root_folders] == ["Archive"]
+    assert [f.id for f in archive_children] == [folder_id]
+
+
 async def test_two_server_sync_with_folder_structure():
     """
     Server A uploads 'photos/trip/beach.jpg'.

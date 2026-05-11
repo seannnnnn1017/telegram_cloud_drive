@@ -15,6 +15,7 @@ from .database import (
     get_folder_by_name,
     get_folder_by_uid,
     get_folder_by_message_id,
+    get_unique_unidentified_folder_by_name,
     insert_file,
     list_all_folder_message_ids,
     list_all_message_ids,
@@ -23,7 +24,6 @@ from .database import (
     remove_deleted_message_ids,
     update_file_sync_metadata,
     update_folder_favorite,
-    update_folder_metadata,
     update_folder_sync_metadata,
 )
 
@@ -167,15 +167,17 @@ async def _import_folder_message(message) -> bool:
         folder = await get_folder_by_message_id(tg_msg_id)
     if folder is None:
         folder = await get_folder_by_name(name, parent_id)
+    if folder is None:
+        folder = await get_unique_unidentified_folder_by_name(name)
     if folder is not None:
-        updates: dict = {}
-        if not folder.uid:
-            updates["uid"] = parsed["uid"]
-        if not folder.tg_message_id:
-            updates["tg_message_id"] = tg_msg_id
-        if updates:
-            folder = await update_folder_metadata(folder.id, **updates)
-        await update_folder_favorite(folder.id, parsed["favorite"])
+        await update_folder_sync_metadata(
+            folder.id,
+            name=name,
+            parent_id=parent_id,
+            uid=parsed["uid"],
+            tg_message_id=tg_msg_id,
+            favorite=parsed["favorite"],
+        )
         return False
 
     folder_id = await create_folder(
@@ -216,6 +218,8 @@ async def _sync_existing_folder_message(message, parsed: dict) -> bool:
         folder = await get_folder_by_message_id(tg_msg_id)
     if folder is None:
         folder = await get_folder_by_name(name, parent_id)
+    if folder is None:
+        folder = await get_unique_unidentified_folder_by_name(name)
     if folder is None:
         return False
 
