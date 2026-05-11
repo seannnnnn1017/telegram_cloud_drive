@@ -22,8 +22,10 @@
   /* Header */
   .head{display:flex;align-items:center;gap:16px}
   .mark{width:24px;height:24px;border-radius:6px;background:var(--green);display:grid;place-items:center;color:#001b0b;font-weight:600;font-size:12px;box-shadow:0 0 0 1px rgba(0,255,102,0.3),0 8px 22px -8px rgba(0,255,102,0.5);flex-shrink:0}
+  .brand-block{display:grid;gap:2px}
   .brand{font-weight:500;letter-spacing:0.04em;font-size:14px}
   .brand small{color:var(--ink-3);font-weight:400;letter-spacing:0;margin-left:8px;font-size:12px}
+  .version{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--ink-4);letter-spacing:0}
   .head .grow{flex:1}
   .upload-actions{display:flex;align-items:center;gap:8px}
   .upload-menu-wrap{position:relative}
