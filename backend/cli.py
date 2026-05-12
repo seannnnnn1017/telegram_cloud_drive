@@ -275,14 +275,21 @@ async def idle_watchdog(server, app, timeout_seconds: int) -> None:
             server.should_exit = True
             return
         current_timeout = int(getattr(app.state, "idle_timeout_seconds", timeout_seconds))
-        if current_timeout <= 0:
-            await asyncio.sleep(1)
-            continue
-        await asyncio.sleep(min(1, current_timeout))
+        shutdown_event = getattr(app.state, "shutdown_event", None)
+        wait_seconds = 1 if current_timeout <= 0 else min(1, current_timeout)
+        if shutdown_event is not None:
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=wait_seconds)
+            except asyncio.TimeoutError:
+                pass
+        else:
+            await asyncio.sleep(wait_seconds)
         if getattr(app.state, "shutdown_requested", False):
             print("telecloud: shutdown requested from web UI", flush=True)
             server.should_exit = True
             return
+        if current_timeout <= 0:
+            continue
         last_activity = getattr(app.state, "last_activity", time.monotonic())
         current_timeout = int(getattr(app.state, "idle_timeout_seconds", current_timeout))
         if current_timeout > 0 and time.monotonic() - last_activity >= current_timeout:

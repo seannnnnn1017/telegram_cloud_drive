@@ -130,14 +130,22 @@ async def test_ingest_telegram_message_writes_identifying_caption_json():
     assert files[0].uid == initial_caption["uid"]
 
 
-async def test_upload_file_too_large(mock_tg, client):
-    big = b"x" * (21 * 1024 * 1024)
-    async with client as c:
-        r = await c.post(
-            "/api/upload",
-            files={"file": ("big.zip", big, "application/zip")},
-        )
-    assert r.status_code == 413
+async def test_upload_file_splits_large_file(mock_tg, client):
+    mock_tg.send_document.side_effect = [
+        {"file_id": "TG_MAIN", "message_id": 100},
+        {"file_id": "TG_PART_1", "message_id": 101},
+    ]
+
+    with patch("backend.main.CHUNK_SIZE", 4):
+        async with client as c:
+            r = await c.post(
+                "/api/upload",
+                files={"file": ("big.zip", b"abcdef", "application/zip")},
+            )
+
+    assert r.status_code == 201
+    assert r.json()["part_count"] == 2
+    assert mock_tg.send_document.await_count == 2
 
 
 async def test_list_files_empty(client):
@@ -263,6 +271,32 @@ async def test_download_file(mock_tg, client):
     assert r.status_code == 200
     assert r.content == b"fake file content"
     assert "attachment" in r.headers["content-disposition"]
+
+
+async def test_download_reassembles_multipart_file(mock_tg, client):
+    content = b"abcdefghij"
+    mock_tg.send_document.side_effect = [
+        {"file_id": "TG_MAIN", "message_id": 100},
+        {"file_id": "TG_PART_1", "message_id": 101},
+        {"file_id": "TG_PART_2", "message_id": 102},
+    ]
+
+    with patch("backend.main.CHUNK_SIZE", 4):
+        async with client as c:
+            up = await c.post("/api/upload", files={"file": ("large.bin", content, "application/octet-stream")})
+            fid = up.json()["id"]
+            mock_tg.download_file.side_effect = [b"abcd", b"efgh", b"ij"]
+            r = await c.get(f"/api/files/{fid}/download")
+
+    assert up.status_code == 201
+    assert up.json()["part_count"] == 3
+    assert r.status_code == 200
+    assert r.content == content
+    assert [call.args[0] for call in mock_tg.download_file.await_args_list] == [
+        "TG_MAIN",
+        "TG_PART_1",
+        "TG_PART_2",
+    ]
 
 
 async def test_download_not_found(client):

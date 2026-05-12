@@ -116,6 +116,16 @@ class NoCacheStaticFiles(StaticFiles):
         return response
 
 
+class ActivityMiddleware:
+    def __init__(self, app):
+        self.asgi_app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            app.state.last_activity = time.monotonic()
+        await self.asgi_app(scope, receive, send)
+
+
 def zip_entry_name(filename: str, used_names: set[str]) -> str:
     safe_name = (filename or "file").replace("\\", "/").split("/")[-1] or "file"
     if safe_name not in used_names:
@@ -562,6 +572,7 @@ async def poll_telegram_uploads(tg: TelegramClient) -> None:
 async def lifespan(app: FastAPI):
     global _sse_shutdown
     _sse_shutdown = asyncio.Event()
+    app.state.shutdown_event = asyncio.Event()
     app.state.shutdown_requested = False
     await init_db()
     app.state.tg_client = build_tg_client()
@@ -590,15 +601,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(ActivityMiddleware)
 app.state.last_activity = time.monotonic()
 app.state.idle_timeout_seconds = int(os.getenv("TELECLOUD_IDLE_TIMEOUT", "900") or "900")
 app.state.shutdown_requested = False
-
-
-@app.middleware("http")
-async def track_activity(request: Request, call_next):
-    app.state.last_activity = time.monotonic()
-    return await call_next(request)
 
 
 @app.get("/api/files", response_model=list[FileResponse])
@@ -811,6 +817,9 @@ async def api_update_server_settings(body: ServerSettingsRequest):
 @app.post("/api/server/shutdown", response_model=dict)
 async def api_shutdown_server():
     app.state.shutdown_requested = True
+    shutdown_event = getattr(app.state, "shutdown_event", None)
+    if shutdown_event is not None:
+        shutdown_event.set()
     signal_sse_shutdown()
     return {"ok": True}
 

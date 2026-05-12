@@ -22,9 +22,12 @@ const state = {
   previewObjectUrl: null,
   previewProgressId: null,
   deleteSelectedBusy: false,
+  shuttingDown: false,
 };
 
 const _downloadingIds = new Set();
+const _transferControllers = new Set();
+const _activeXhrs = new Set();
 
 function beginTransfer() {
   state.activeTransfers += 1;
@@ -32,6 +35,17 @@ function beginTransfer() {
 
 function endTransfer() {
   state.activeTransfers = Math.max(0, state.activeTransfers - 1);
+}
+
+function trackTransferController(controller) {
+  _transferControllers.add(controller);
+  return () => _transferControllers.delete(controller);
+}
+
+function abortActiveTransfers() {
+  state.shuttingDown = true;
+  for (const controller of Array.from(_transferControllers)) controller.abort();
+  for (const xhr of Array.from(_activeXhrs)) xhr.abort();
 }
 
 function esc(str) {
@@ -264,7 +278,7 @@ async function showPreview(file) {
   } catch (err) {
     if (requestId === state.previewRequestId) {
       closeModal();
-      toast(err.message || 'Preview failed', true);
+      if (err.name !== 'AbortError' || !state.shuttingDown) toast(err.message || 'Preview failed', true);
       finishUploadProgress(progressId);
       if (state.previewProgressId === progressId) state.previewProgressId = null;
     }
@@ -296,8 +310,10 @@ async function doDownload(file) {
   const progressId = createUploadProgress(`↓ ${file.name}`);
   setUploadProgress(progressId, 0);
   beginTransfer();
+  const controller = new AbortController();
+  const untrackController = trackTransferController(controller);
   try {
-    const r = await fetch(`/api/files/${file.id}/download`);
+    const r = await fetch(`/api/files/${file.id}/download`, { signal: controller.signal });
     if (!r.ok) {
       let detail = 'Download failed';
       try { detail = (await r.json()).detail || detail; } catch {}
@@ -324,8 +340,10 @@ async function doDownload(file) {
     }
     downloadBlob(blob, file.name);
   } catch (err) {
+    if (err.name === 'AbortError' && state.shuttingDown) return;
     toast(err.message || 'Download failed', true);
   } finally {
+    untrackController();
     finishUploadProgress(progressId);
     endTransfer();
     _downloadingIds.delete(file.id);
@@ -516,11 +534,14 @@ document.getElementById('bulk-download').onclick = async () => {
   beginTransfer();
   const progressId = createUploadProgress(`↓ ${ids.length} files (zip)`);
   setUploadProgress(progressId, 0);
+  const controller = new AbortController();
+  const untrackController = trackTransferController(controller);
   try {
     const r = await fetch('/api/files/bulk-download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
+      signal: controller.signal,
     });
     if (!r.ok) {
       try { toast((await r.json()).detail || 'Download failed', true); }
@@ -546,9 +567,10 @@ document.getElementById('bulk-download').onclick = async () => {
     a.download = 'vault-selection.zip';
     a.click();
     URL.revokeObjectURL(url);
-  } catch {
-    toast('Download failed', true);
+  } catch (err) {
+    if (err.name !== 'AbortError' || !state.shuttingDown) toast('Download failed', true);
   } finally {
+    untrackController();
     finishUploadProgress(progressId);
     endTransfer();
     btn.disabled = false;
@@ -665,6 +687,22 @@ async function ensureFolderPath(pathParts) {
 
 const ENC_KEY = 'vault-encryption-key';
 const ENC_MAGIC = new TextEncoder().encode('TCDENC1');
+const WEB_CRYPTO_ERROR = '本機加密需要瀏覽器 Web Crypto。請用 HTTPS 或在 A 電腦用 localhost 開啟；如果是從 B 電腦用 http://A電腦IP 存取，請先到設定關閉 Encrypt 後重新上傳。';
+
+function getWebCrypto() {
+  const api = globalThis.crypto;
+  if (
+    !api ||
+    !api.subtle ||
+    typeof api.subtle.importKey !== 'function' ||
+    typeof api.subtle.encrypt !== 'function' ||
+    typeof api.subtle.decrypt !== 'function' ||
+    typeof api.getRandomValues !== 'function'
+  ) {
+    throw new Error(WEB_CRYPTO_ERROR);
+  }
+  return api;
+}
 
 function bytesToBase64(bytes) {
   let s = '';
@@ -677,20 +715,22 @@ function base64ToBytes(value) {
 }
 
 async function getEncryptionKey() {
+  const cryptoApi = getWebCrypto();
   let raw = localStorage.getItem(ENC_KEY);
   if (!raw) {
-    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    const bytes = cryptoApi.getRandomValues(new Uint8Array(32));
     raw = bytesToBase64(bytes);
     localStorage.setItem(ENC_KEY, raw);
   }
-  return crypto.subtle.importKey('raw', base64ToBytes(raw), 'AES-GCM', false, ['encrypt', 'decrypt']);
+  return cryptoApi.subtle.importKey('raw', base64ToBytes(raw), 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 
 async function encryptedUploadFile(file) {
   if (!state.settings.encrypt) return { file, originalMime: file.type || 'application/octet-stream', encrypted: false };
-  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const cryptoApi = getWebCrypto();
+  const iv = cryptoApi.getRandomValues(new Uint8Array(12));
   const key = await getEncryptionKey();
-  const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, await file.arrayBuffer()));
+  const encrypted = new Uint8Array(await cryptoApi.subtle.encrypt({ name: 'AES-GCM', iv }, key, await file.arrayBuffer()));
   const payload = new Uint8Array(ENC_MAGIC.length + iv.length + encrypted.length);
   payload.set(ENC_MAGIC, 0);
   payload.set(iv, ENC_MAGIC.length);
@@ -703,23 +743,27 @@ async function encryptedUploadFile(file) {
 }
 
 async function decryptPayload(buffer, mimeType) {
+  const cryptoApi = getWebCrypto();
   const bytes = new Uint8Array(buffer);
   const header = bytes.slice(0, ENC_MAGIC.length);
   if (!ENC_MAGIC.every((b, i) => header[i] === b)) throw new Error('Missing local encryption header');
   const iv = bytes.slice(ENC_MAGIC.length, ENC_MAGIC.length + 12);
   const data = bytes.slice(ENC_MAGIC.length + 12);
   const key = await getEncryptionKey();
-  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data);
+  const plain = await cryptoApi.subtle.decrypt({ name: 'AES-GCM', iv }, key, data);
   return new Blob([plain], { type: mimeType || 'application/octet-stream' });
 }
 
 async function decryptedBlob(file) {
   beginTransfer();
+  const controller = new AbortController();
+  const untrackController = trackTransferController(controller);
   try {
-    const r = await fetch(`/api/files/${file.id}/download`);
+    const r = await fetch(`/api/files/${file.id}/download`, { signal: controller.signal });
     if (!r.ok) throw new Error('Download failed');
     return await decryptPayload(await r.arrayBuffer(), file.mime_type);
   } finally {
+    untrackController();
     endTransfer();
   }
 }
@@ -742,9 +786,9 @@ async function uploadFileTracked(file, targetFolderId = state.folderId) {
   beginTransfer();
   try {
     upload = await encryptedUploadFile(file);
-  } catch {
+  } catch (err) {
     endTransfer();
-    toast(`${file.name} encryption failed`, true);
+    toast(err.message || `${file.name} encryption failed`, true);
     return false;
   }
 
@@ -758,27 +802,39 @@ async function uploadFileTracked(file, targetFolderId = state.folderId) {
   if (targetFolderId !== null) form.append('folder_id', targetFolderId);
 
   return await new Promise((resolve) => {
+    let completed = false;
+    const complete = (ok) => {
+      if (completed) return;
+      completed = true;
+      _activeXhrs.delete(xhr);
+      endTransfer();
+      finishUploadProgress(progressId);
+      resolve(ok);
+    };
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable) {
         setUploadProgress(progressId, e.loaded / e.total * 100);
       }
     });
     xhr.onload = () => {
-      endTransfer();
-      finishUploadProgress(progressId);
       if (xhr.status === 201) {
         toast(`${file.name} uploaded`);
         loadFiles();
         loadStorage();
-        resolve(true);
+        complete(true);
       } else {
         try { toast(JSON.parse(xhr.responseText).detail || 'Upload failed', true); }
         catch { toast('Upload failed', true); }
-        resolve(false);
+        complete(false);
       }
     };
-    xhr.onerror = () => { endTransfer(); finishUploadProgress(progressId); toast('Network error', true); resolve(false); };
+    xhr.onerror = () => { toast('Network error', true); complete(false); };
+    xhr.onabort = () => {
+      if (!state.shuttingDown) toast('Upload cancelled', true);
+      complete(false);
+    };
     xhr.open('POST', '/api/upload');
+    _activeXhrs.add(xhr);
     xhr.send(form);
   });
 }
@@ -2151,6 +2207,7 @@ async function requestServerShutdown({ clearLocalKeys = false } = {}) {
     localStorage.removeItem(ENC_KEY);
     localStorage.removeItem(SETTINGS_KEY);
   }
+  abortActiveTransfers();
   try {
     await fetch('/api/server/shutdown', { method: 'POST' });
     document.body.innerHTML = `<div class="empty-state" style="min-height:100vh;display:grid;place-items:center">${clearLocalKeys ? '已登出並關閉伺服器' : '正在關閉伺服器'}</div>`;
