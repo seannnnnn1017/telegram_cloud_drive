@@ -1,5 +1,6 @@
 import pytest
 import json
+import httpx
 from pytest_httpx import HTTPXMock
 from backend.telegram import TelegramClient
 
@@ -78,6 +79,32 @@ async def test_send_document_retries_rate_limit(httpx_mock: HTTPXMock, tg: Teleg
     result = await tg.send_document("photo.jpg", b"data", "image/jpeg")
     assert result["message_id"] == 43
     assert result["file_id"] == "FILE_AFTER_RETRY"
+
+
+async def test_send_document_uses_long_write_timeout(httpx_mock: HTTPXMock, tg: TelegramClient):
+    httpx_mock.add_response(
+        url="https://api.telegram.org/botTESTTOKEN/sendDocument",
+        json={
+            "ok": True,
+            "result": {
+                "message_id": 44,
+                "document": {"file_id": "FILE_TIMEOUT", "file_size": 1024},
+            },
+        },
+    )
+    await tg.send_document("video.mp4", b"data", "video/mp4")
+    request = httpx_mock.get_requests()[0]
+    assert request.extensions["timeout"]["write"] == 300.0
+
+
+async def test_send_document_reports_write_timeout(httpx_mock: HTTPXMock, tg: TelegramClient):
+    httpx_mock.add_exception(
+        httpx.WriteTimeout("slow upload"),
+        url="https://api.telegram.org/botTESTTOKEN/sendDocument",
+    )
+    with pytest.raises(ValueError, match="timed out"):
+        await tg.send_document("video.mp4", b"data", "video/mp4")
+    assert len(httpx_mock.get_requests()) == 1
 
 
 async def test_get_file_url(httpx_mock: HTTPXMock, tg: TelegramClient):

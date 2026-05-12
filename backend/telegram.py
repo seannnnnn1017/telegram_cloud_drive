@@ -3,6 +3,13 @@ from typing import Optional
 
 import httpx
 
+UPLOAD_TIMEOUT = httpx.Timeout(connect=15.0, read=120.0, write=300.0, pool=15.0)
+RETRYABLE_NETWORK_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+)
+
 
 class TelegramClient:
     def __init__(
@@ -33,7 +40,7 @@ class TelegramClient:
             f"{self._api}/sendDocument",
             data=form_data,
             files={"document": (filename, content, mime_type)},
-            timeout=60.0,
+            timeout=UPLOAD_TIMEOUT,
         )
         if not data.get("ok"):
             raise ValueError(f"Telegram error {r.status_code}: {data.get('description', 'unknown error')}")
@@ -54,8 +61,21 @@ class TelegramClient:
     async def _post_with_retry(self, url: str, **kwargs) -> tuple[httpx.Response, dict]:
         last_response = None
         last_data = {}
+        last_error = None
         for attempt in range(4):
-            response = await self._client.post(url, **kwargs)
+            try:
+                response = await self._client.post(url, **kwargs)
+            except RETRYABLE_NETWORK_ERRORS as exc:
+                last_error = exc
+                if attempt == 3:
+                    break
+                await asyncio.sleep(0.5 * (2 ** attempt))
+                continue
+            except httpx.TimeoutException as exc:
+                raise ValueError(f"Telegram request timed out: {exc}") from exc
+            except httpx.HTTPError as exc:
+                raise ValueError(f"Telegram request failed: {exc}") from exc
+
             data = response.json()
             last_response = response
             last_data = data
@@ -66,6 +86,8 @@ class TelegramClient:
             delay = float(retry_after) if retry_after is not None else 0.5 * (2 ** attempt)
             await asyncio.sleep(delay)
 
+        if last_error is not None:
+            raise ValueError(f"Telegram upload failed after retries: {last_error}") from last_error
         return last_response, last_data
 
     async def get_file_url(self, file_id: str) -> str:

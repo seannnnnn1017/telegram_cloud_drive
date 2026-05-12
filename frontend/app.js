@@ -726,20 +726,7 @@ async function getEncryptionKey() {
 }
 
 async function encryptedUploadFile(file) {
-  if (!state.settings.encrypt) return { file, originalMime: file.type || 'application/octet-stream', encrypted: false };
-  const cryptoApi = getWebCrypto();
-  const iv = cryptoApi.getRandomValues(new Uint8Array(12));
-  const key = await getEncryptionKey();
-  const encrypted = new Uint8Array(await cryptoApi.subtle.encrypt({ name: 'AES-GCM', iv }, key, await file.arrayBuffer()));
-  const payload = new Uint8Array(ENC_MAGIC.length + iv.length + encrypted.length);
-  payload.set(ENC_MAGIC, 0);
-  payload.set(iv, ENC_MAGIC.length);
-  payload.set(encrypted, ENC_MAGIC.length + iv.length);
-  return {
-    file: new File([payload], file.name, { type: 'application/octet-stream' }),
-    originalMime: file.type || 'application/octet-stream',
-    encrypted: true,
-  };
+  return { file, originalMime: file.type || 'application/octet-stream', encrypted: false };
 }
 
 async function decryptPayload(buffer, mimeType) {
@@ -1999,7 +1986,7 @@ const SETTINGS_KEY = 'vault-settings';
 const defaultSettings = {
   botToken: '', chatId: '', apiBaseUrl: 'https://api.telegram.org',
   theme: 'dark',
-  encrypt: true, expiry: '24h', shareBaseUrl: '', idleTimeoutSeconds: 900
+  encrypt: false, expiry: '24h', shareBaseUrl: '', idleTimeoutSeconds: 900
 };
 function loadSettings() { try { return { ...defaultSettings, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }; } catch { return { ...defaultSettings }; } }
 function saveSettings(s) { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
@@ -2028,7 +2015,10 @@ function applySettings(s) {
   });
   ['encrypt'].forEach(k => {
     const t = document.querySelector(`[data-toggle-key="${k}"]`);
-    if (t) t.classList.toggle('on', !!s[k]);
+    if (t) {
+      t.classList.remove('on');
+      t.disabled = true;
+    }
   });
   applyTheme(s.theme);
 }
@@ -2141,10 +2131,7 @@ document.getElementById('set-save').onclick = async () => {
     ? `${location.protocol}//localhost:${location.port || (location.protocol === 'https:' ? '443' : '80')}`
     : '';
   s.idleTimeoutSeconds = Number(document.querySelector('#set-idle-timeout button.on')?.dataset.v || 900);
-  ['encrypt'].forEach(k => {
-    const t = document.querySelector(`[data-toggle-key="${k}"]`);
-    s[k] = !!(t && t.classList.contains('on'));
-  });
+  s.encrypt = false;
 
   if (s.botToken && s.chatId) {
     const r = await fetch('/api/settings/telegram', {

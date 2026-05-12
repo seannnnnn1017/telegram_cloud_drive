@@ -13,7 +13,7 @@ db_module.DB_PATH = Path(tempfile.gettempdir()) / "test_vault_api.db"
 
 from backend.main import app
 from backend.main import extract_message_file, ingest_telegram_message
-from backend.database import init_db, list_deleted_message_ids, list_files
+from backend.database import init_db, insert_file, list_deleted_message_ids, list_files
 from backend.sync import parse_caption
 
 
@@ -297,6 +297,25 @@ async def test_download_reassembles_multipart_file(mock_tg, client):
         "TG_PART_1",
         "TG_PART_2",
     ]
+
+
+async def test_download_rejects_incomplete_multipart_file(mock_tg, client):
+    fid = await insert_file(
+        name="broken.bin",
+        size=10,
+        mime_type="application/octet-stream",
+        tg_file_id="TG_MAIN",
+        tg_message_id=100,
+        uploaded_at="2026-05-12T00:00:00+00:00",
+        part_count=3,
+    )
+
+    async with client as c:
+        r = await c.get(f"/api/files/{fid}/download")
+
+    assert r.status_code == 409
+    assert "incomplete" in r.json()["detail"]
+    mock_tg.download_file.assert_not_awaited()
 
 
 async def test_download_not_found(client):

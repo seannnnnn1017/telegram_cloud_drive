@@ -405,6 +405,11 @@ async def _download_file_content(record) -> bytes:
     tg = get_tg_client()
     if record.part_count > 0:
         parts = await list_file_parts(record.id)
+        if len(parts) != record.part_count - 1:
+            raise HTTPException(
+                status_code=409,
+                detail=f"File upload is incomplete: expected {record.part_count - 1} parts, found {len(parts)}",
+            )
         chunks = [await tg.download_file(record.tg_file_id)]
         for part in parts:
             chunks.append(await tg.download_file(part.tg_file_id))
@@ -847,6 +852,18 @@ async def api_upload(
         if path_parts:
             caption_name = "/".join(path_parts) + "/" + file.filename
 
+    async def send_document_or_502(filename: str, payload: bytes, mime_type: str, caption: str) -> dict:
+        try:
+            return await tg.send_document(filename, payload, mime_type, caption=caption)
+        except ValueError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    async def edit_caption_or_502(message_id: int, caption: str) -> None:
+        try:
+            await tg.edit_message_caption(message_id, caption)
+        except ValueError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
     if len(content) <= CHUNK_SIZE:
         # Single-chunk upload
         caption = make_caption(
@@ -857,13 +874,13 @@ async def api_upload(
             uploaded_at=now,
             uid=file_uid,
         )
-        tg_result = await tg.send_document(
+        tg_result = await send_document_or_502(
             file.filename, content, file.content_type or "application/octet-stream",
             caption=caption,
         )
         bot_msg_id = tg_result["message_id"]
         if _CHAT_IS_PRIVATE:
-            await tg.edit_message_caption(bot_msg_id, make_caption(
+            await edit_caption_or_502(bot_msg_id, make_caption(
                 name=caption_name,
                 size=len(content),
                 mime_type=stored_mime_type,
@@ -902,13 +919,13 @@ async def api_upload(
             uid=file_uid,
             part_count=total_parts,
         )
-        tg_result = await tg.send_document(
+        tg_result = await send_document_or_502(
             file.filename, chunks[0], file.content_type or "application/octet-stream",
             caption=caption,
         )
         bot_msg_id = tg_result["message_id"]
         if _CHAT_IS_PRIVATE:
-            await tg.edit_message_caption(bot_msg_id, make_caption(
+            await edit_caption_or_502(bot_msg_id, make_caption(
                 name=caption_name,
                 size=len(content),
                 mime_type=stored_mime_type,
@@ -921,6 +938,39 @@ async def api_upload(
                 part_count=total_parts,
             ))
         thumb_file_id = None if encrypted else tg_result.get("thumb_file_id")
+        uploaded_parts = []
+
+        # Upload remaining chunks as part messages
+        for part_index, chunk in enumerate(chunks[1:], start=1):
+            part_caption = make_part_caption(
+                file_uid=file_uid,
+                part_index=part_index,
+                total_parts=total_parts,
+                size=len(chunk),
+            )
+            part_result = await send_document_or_502(
+                f"{file.filename}.part{part_index}",
+                chunk,
+                "application/octet-stream",
+                caption=part_caption,
+            )
+            part_msg_id = part_result["message_id"]
+            if _CHAT_IS_PRIVATE:
+                await edit_caption_or_502(part_msg_id, make_part_caption(
+                    file_uid=file_uid,
+                    part_index=part_index,
+                    total_parts=total_parts,
+                    size=len(chunk),
+                    tg_file_id=part_result["file_id"],
+                    bot_message_id=part_msg_id,
+                ))
+            uploaded_parts.append({
+                "part_index": part_index,
+                "tg_file_id": part_result["file_id"],
+                "tg_message_id": part_msg_id,
+                "size": len(chunk),
+            })
+
         new_id = await insert_file(
             name=file.filename,
             size=len(content),
@@ -934,38 +984,8 @@ async def api_upload(
             uid=file_uid,
             part_count=total_parts,
         )
-
-        # Upload remaining chunks as part messages
-        for part_index, chunk in enumerate(chunks[1:], start=1):
-            part_caption = make_part_caption(
-                file_uid=file_uid,
-                part_index=part_index,
-                total_parts=total_parts,
-                size=len(chunk),
-            )
-            part_result = await tg.send_document(
-                f"{file.filename}.part{part_index}",
-                chunk,
-                "application/octet-stream",
-                caption=part_caption,
-            )
-            part_msg_id = part_result["message_id"]
-            if _CHAT_IS_PRIVATE:
-                await tg.edit_message_caption(part_msg_id, make_part_caption(
-                    file_uid=file_uid,
-                    part_index=part_index,
-                    total_parts=total_parts,
-                    size=len(chunk),
-                    tg_file_id=part_result["file_id"],
-                    bot_message_id=part_msg_id,
-                ))
-            await insert_file_part(
-                file_id=new_id,
-                part_index=part_index,
-                tg_file_id=part_result["file_id"],
-                tg_message_id=part_msg_id,
-                size=len(chunk),
-            )
+        for part in uploaded_parts:
+            await insert_file_part(file_id=new_id, **part)
 
     record = await get_file(new_id)
     return file_response(record)
@@ -1224,6 +1244,11 @@ async def api_bulk_download(body: BulkDeleteRequest):
         async with _TG_SEM:
             if rec.part_count > 0:
                 parts = await list_file_parts(rec.id)
+                if len(parts) != rec.part_count - 1:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"File upload is incomplete: expected {rec.part_count - 1} parts, found {len(parts)}",
+                    )
                 chunks = [await tg.download_file(rec.tg_file_id)]
                 for part in parts:
                     chunks.append(await tg.download_file(part.tg_file_id))
